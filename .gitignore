@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+
+# Окружение
+.env
+.env.*
+.venv/
+
+# Логи
+logs/
+*.log
+
+# Dagster
+.dagster/
+
+# Сборка
+.cache/
+dist/
+build/
+*.egg-info/
+
+# Тесты/линтеры
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/
+*.iml
