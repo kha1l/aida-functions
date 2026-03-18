@@ -10,7 +10,7 @@ from config import rabbitmq_settings
 
 
 REQUIRED_PAYLOAD_KEYS = ("chat_id", "post", "text")
-OPTIONAL_PAYLOAD_KEYS = ("topic_id",)
+OPTIONAL_PAYLOAD_KEYS = ("topic_id", "unit_uuid")
 PUBLISH_RETRY_ATTEMPTS = 3
 
 
@@ -20,6 +20,7 @@ def build_payload(
     post: Any,
     text: str,
     topic_id: Optional[int] = None,
+    unit_uuid: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Собирает payload для очереди и валидирует его."""
     payload: Dict[str, Any] = {
@@ -29,6 +30,8 @@ def build_payload(
     }
     if topic_id is not None:
         payload["topic_id"] = topic_id
+    if unit_uuid is not None:
+        payload["unit_uuid"] = unit_uuid
     validate_payload(payload)
     return payload
 
@@ -53,6 +56,10 @@ def validate_payload(payload: Dict[str, Any]) -> None:
     topic_id = payload.get("topic_id")
     if topic_id is not None and not isinstance(topic_id, int):
         raise ValueError("payload.topic_id must be int when provided")
+
+    unit_uuid = payload.get("unit_uuid")
+    if unit_uuid is not None and not isinstance(unit_uuid, str):
+        raise ValueError("payload.unit_uuid must be str when provided")
 
     try:
         json.dumps(payload)

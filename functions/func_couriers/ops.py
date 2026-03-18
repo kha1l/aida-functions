@@ -186,6 +186,7 @@ async def _run_couriers(context: OpExecutionContext) -> None:
                             topic_id=sub.topic_id,
                             post="couriers",
                             text=report_text,
+                            unit_uuid=unit_uuid,
                         )
                         async with publish_lock:
                             await rabbitmq.publish_async(payload)
