@@ -5,4 +5,5 @@ from .ops import stops_op
 
 @job
 def stops_job():
+    """Запускает Dagster job для отчёта stops."""
     stops_op()

@@ -10,5 +10,5 @@ if _cfg.enabled:
     couriers_schedule = ScheduleDefinition(
         job=couriers_job,
         cron_schedule=_cfg.cron,
-        timezone=_cfg.timezone,
+        execution_timezone=_cfg.timezone,
     )

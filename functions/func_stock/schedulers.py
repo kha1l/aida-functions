@@ -10,5 +10,5 @@ if _cfg.enabled:
     stock_schedule = ScheduleDefinition(
         job=stock_job,
         cron_schedule=_cfg.cron,
-        timezone=_cfg.timezone,
+        execution_timezone=_cfg.timezone,
     )

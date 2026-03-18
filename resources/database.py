@@ -1,5 +1,6 @@
 """Dagster-ресурс для работы с БД."""
 
+from functools import cached_property
 from dataclasses import dataclass
 from typing import Any, Dict
 
@@ -17,14 +18,23 @@ class DatabaseResource:
     echo: bool
     pool_pre_ping: bool
 
+    @cached_property
+    def engine(self):
+        """Создает и кэширует SQLAlchemy engine с текущими настройками."""
+        return build_engine(self.url, echo=self.echo, pool_pre_ping=self.pool_pre_ping)
+
+    @cached_property
+    def sessionmaker(self):
+        """Создает и кэширует sessionmaker поверх engine."""
+        return build_sessionmaker(self.engine)
+
     def get_engine(self):
         """Создает SQLAlchemy engine с текущими настройками."""
-        return build_engine(self.url, echo=self.echo, pool_pre_ping=self.pool_pre_ping)
+        return self.engine
 
     def get_sessionmaker(self):
         """Создает sessionmaker поверх нового engine."""
-        engine = self.get_engine()
-        return build_sessionmaker(engine)
+        return self.sessionmaker
 
 
 @resource(

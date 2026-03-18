@@ -10,5 +10,5 @@ if _cfg.enabled:
     tickets_schedule = ScheduleDefinition(
         job=tickets_job,
         cron_schedule=_cfg.cron,
-        timezone=_cfg.timezone,
+        execution_timezone=_cfg.timezone,
     )

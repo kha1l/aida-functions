@@ -147,3 +147,71 @@ def database_settings() -> DatabaseSettings:
         echo=_env_bool("DATABASE_ECHO", False),
         pool_pre_ping=_env_bool("DATABASE_POOL_PRE_PING", True),
     )
+
+
+# -------------------
+# Dodo API
+# -------------------
+
+@dataclass(frozen=True)
+class DodoApiSettings:
+    """Настройки доступа к Dodo API."""
+
+    timeout_seconds: int
+    retries_500: int
+    max_concurrent_requests: int
+
+
+def dodo_api_settings() -> DodoApiSettings:
+    """Собирает настройки Dodo API из env."""
+    return DodoApiSettings(
+        timeout_seconds=_env_int("DODO_API_TIMEOUT_SECONDS", 30),
+        retries_500=_env_int("DODO_API_RETRIES_500", 3),
+        max_concurrent_requests=_env_int("DODO_API_MAX_CONCURRENT_REQUESTS", 10),
+    )
+
+
+# -------------------
+# Couriers
+# -------------------
+
+@dataclass(frozen=True)
+class CouriersSettings:
+    """Настройки job couriers."""
+
+    max_concurrent_units: int
+
+
+def couriers_settings() -> CouriersSettings:
+    """Собирает настройки couriers job из env."""
+    return CouriersSettings(
+        max_concurrent_units=_env_int("COURIERS_MAX_CONCURRENT_UNITS", 15),
+    )
+
+
+# -------------------
+# Weather API
+# -------------------
+
+@dataclass(frozen=True)
+class WeatherSettings:
+    """Настройки доступа к погодному API."""
+
+    api_key: Optional[str]
+    timeout_seconds: int
+    forecast_count: int
+    lang: str
+    retries: int
+    max_concurrent_requests: int
+
+
+def weather_settings() -> WeatherSettings:
+    """Собирает настройки OpenWeather из env."""
+    return WeatherSettings(
+        api_key=_env("WEATHER_API_KEY") or _env("API_WEATHER_KEY"),
+        timeout_seconds=_env_int("WEATHER_API_TIMEOUT_SECONDS", 15),
+        forecast_count=_env_int("WEATHER_FORECAST_COUNT", 6),
+        lang=_env("WEATHER_LANG", "ru") or "ru",
+        retries=_env_int("WEATHER_API_RETRIES", 3),
+        max_concurrent_requests=_env_int("WEATHER_MAX_CONCURRENT_REQUESTS", 5),
+    )

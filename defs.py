@@ -1,6 +1,6 @@
 from dagster import Definitions
 
-from resources import db_resource, rabbitmq_resource
+from resources import db_resource, dodo_api_resource, rabbitmq_resource
 
 from functions.func_birthday.jobs import birthday_job
 from functions.func_birthday.schedulers import birthday_schedule
@@ -57,6 +57,7 @@ _schedules = [
 
 resource_defs = {
     "db": db_resource,
+    "dodo_api": dodo_api_resource,
     "rabbitmq": rabbitmq_resource,
 }
 
