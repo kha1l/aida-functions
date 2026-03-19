@@ -1,3 +1,4 @@
+"""Расписание для hourly-job по отмененным заказам."""
 from dagster import ScheduleDefinition
 
 from config import schedule_config

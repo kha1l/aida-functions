@@ -6,6 +6,8 @@ from functions.func_birthday.jobs import birthday_job
 from functions.func_birthday.schedulers import birthday_schedule
 from functions.func_couriers.jobs import certificates_job, couriers_job, later_job, longers_job, sectors_job, waiting_job
 from functions.func_couriers.schedulers import couriers_schedule
+from functions.func_defect.jobs import defect_job
+from functions.func_defect.schedulers import defect_schedule
 from functions.func_metrics.jobs import metrics_job
 from functions.func_metrics.schedulers import metrics_schedule
 from functions.func_refusal.jobs import refusal_job
@@ -22,6 +24,8 @@ from functions.func_stops.jobs import stops_job
 from functions.func_stops.schedulers import stops_schedule
 from functions.func_tickets.jobs import tickets_job
 from functions.func_tickets.schedulers import tickets_schedule
+from functions.func_writeoff.jobs import writeoff_job
+from functions.func_writeoff.schedulers import writeoff_schedule
 from functions.shared.definition_resources import COMMON_RESOURCE_DEFS
 
 
@@ -34,6 +38,7 @@ _jobs = [
     longers_job,
     sectors_job,
     waiting_job,
+    defect_job,
     metrics_job,
     refusal_job,
     revenue_job,
@@ -45,12 +50,14 @@ _jobs = [
     stock_job,
     stops_job,
     tickets_job,
+    writeoff_job,
 ]
 
 # Manual-job'ы без расписания сюда не добавляем специально.
 _schedules = [
     birthday_schedule,
     couriers_schedule,
+    defect_schedule,
     metrics_schedule,
     refusal_schedule,
     revenue_schedule,
@@ -59,6 +66,7 @@ _schedules = [
     stock_schedule,
     stops_schedule,
     tickets_schedule,
+    writeoff_schedule,
 ]
 
 

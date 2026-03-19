@@ -8,20 +8,19 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Set, Tuple
 
-import aiohttp
 from dagster import OpExecutionContext
 
-from database.requests import (
-    ReportSubscription,
-    load_accounts_and_tokens_bulk,
-    load_units_by_uuids,
-    select_account_ids_for_units,
-    select_report_subscriptions,
+from database.requests import select_report_subscriptions
+from functions.shared.manual_report_runtime import to_int
+from functions.shared.report_job_runtime import (
+    load_report_job_snapshot,
+    log_auth_error,
+    log_final_unit_error,
+    publish_report_to_subscribers,
+    report_job_runtime,
 )
-from functions.shared.manual_report_runtime import html_to_log_text, split_text_for_telegram, to_int
-from functions.shared.unit_time import resolve_unit_now
+from functions.shared.unit_time import floor_unit_to_hour, resolve_unit_now
 from functions.func_couriers.utils.manual_report_common import parse_dodo_datetime
-from messaging import build_payload
 
 TRIGGER_HOURS = {14, 19, 23}
 MAX_CONCURRENT_UNITS = 15
@@ -85,60 +84,26 @@ async def run_metrics(context: OpExecutionContext) -> None:
     rabbitmq = context.resources.rabbitmq
     dodo_api = context.resources.dodo_api
 
-    subscriptions = await select_report_subscriptions(db, "metrics")
-    if not subscriptions:
+    snapshot = await load_report_job_snapshot(
+        db,
+        load_subscriptions=lambda db_: select_report_subscriptions(db_, "metrics"),
+    )
+    if not snapshot.subscriptions:
         context.log.info("metrics_op: нет подписок")
         return
 
-    subs_by_unit: Dict[str, List[ReportSubscription]] = {}
-    accounts_by_unit: Dict[str, List[int]] = {}
-    for sub in subscriptions:
-        subs_by_unit.setdefault(sub.unit_uuid, []).append(sub)
-        if sub.account_id is not None:
-            accounts_by_unit.setdefault(sub.unit_uuid, []).append(sub.account_id)
-
-    unit_uuids = list(subs_by_unit.keys())
-    units, candidate_accounts_by_unit = await asyncio.gather(
-        load_units_by_uuids(db, unit_uuids),
-        select_account_ids_for_units(
-            db,
-            unit_uuids,
-            account_ids_filter_by_unit=accounts_by_unit,
-        ),
-    )
-
-    all_account_ids = {
-        account_id
-        for account_ids in accounts_by_unit.values()
-        for account_id in account_ids
-    }
-    all_account_ids.update(
-        account_id
-        for account_ids in candidate_accounts_by_unit.values()
-        for account_id in account_ids
-    )
-    account_auth_map = await load_accounts_and_tokens_bulk(db, all_account_ids)
-    dodo_api.prime_account_token_cache(account_auth_map)
+    dodo_api.prime_account_token_cache(snapshot.account_auth_map)
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_UNITS)
     publish_lock = asyncio.Lock()
-    request_semaphore = asyncio.Semaphore(max(1, dodo_api.max_concurrent_requests))
+    unit_uuids = list(snapshot.subs_by_unit.keys())
 
-    timeout = aiohttp.ClientTimeout(total=dodo_api.timeout_seconds)
-    async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as dodo_session:
-        dodo_api.configure_runtime(
-            session=dodo_session,
-            request_semaphore=request_semaphore,
-        )
-        rabbitmq_open = getattr(rabbitmq, "open_async", None)
-        if callable(rabbitmq_open):
-            await rabbitmq_open()
-
+    async with report_job_runtime(dodo_api, rabbitmq):
         async def process_unit(unit_uuid: str) -> None:
             async with semaphore:
-                subscribers = subs_by_unit.get(unit_uuid, [])
-                unit = units.get(unit_uuid)
-                unit_name = unit.name if unit and unit.name else unit_uuid
+                subscribers = snapshot.subscribers_for(unit_uuid)
+                unit = snapshot.unit_for(unit_uuid)
+                unit_name = snapshot.unit_name_for(unit_uuid)
 
                 if not subscribers:
                     return
@@ -148,12 +113,11 @@ async def run_metrics(context: OpExecutionContext) -> None:
                     return
 
                 # `production/productivity` принимает только часы, поэтому срезаем период до текущего часа.
-                period_end = local_now.replace(minute=0, second=0, microsecond=0)
+                period_end = floor_unit_to_hour(unit)
                 if period_end.hour not in TRIGGER_HOURS:
                     return
 
-                order_account_ids = list({acc for acc in accounts_by_unit.get(unit_uuid, [])})
-                candidate_accounts = candidate_accounts_by_unit.get(unit_uuid, []) or order_account_ids
+                candidate_accounts = snapshot.candidate_accounts_for(unit_uuid)
                 if not candidate_accounts:
                     context.log.warning("metrics_op: нет токенов для unit %s", unit_uuid)
                     return
@@ -161,9 +125,10 @@ async def run_metrics(context: OpExecutionContext) -> None:
                 report_text: Optional[str] = None
                 last_error_html: Optional[str] = None
                 last_error_status: Optional[int] = None
+                successful_lookup = False
 
                 for account_id in candidate_accounts:
-                    account, _ = account_auth_map.get(account_id, (None, None))
+                    account = snapshot.account_for(account_id)
                     report_text, last_error_html, last_error_status = await _build_metrics_report(
                         dodo_api=dodo_api,
                         unit_uuid=unit_uuid,
@@ -174,54 +139,42 @@ async def run_metrics(context: OpExecutionContext) -> None:
                             account.properties if account else None
                         ),
                     )
-                    if report_text:
+                    if last_error_html is None and last_error_status == 200:
+                        successful_lookup = True
                         break
-                    if last_error_html and last_error_status in {401, 403}:
-                        context.log.warning(
-                            "metrics_op: ошибка Dodo API для unit %s, account_id=%s: %s",
-                            unit_uuid,
-                            account_id,
-                            html_to_log_text(last_error_html),
-                        )
+                    log_auth_error(
+                        context,
+                        log_prefix="metrics_op",
+                        unit_uuid=unit_uuid,
+                        account_id=account_id,
+                        error_html=last_error_html,
+                        error_status=last_error_status,
+                    )
 
-                if not report_text:
-                    if last_error_html:
-                        if last_error_status in {429, 500}:
-                            context.log.error(
-                                "metrics_op: не удалось собрать отчет для unit %s после retry: %s",
-                                unit_uuid,
-                                html_to_log_text(last_error_html),
-                            )
-                        elif last_error_status not in {401, 403}:
-                            context.log.error(
-                                "metrics_op: не удалось собрать отчет для unit %s: %s",
-                                unit_uuid,
-                                html_to_log_text(last_error_html),
-                            )
-                    else:
-                        context.log.warning("metrics_op: нет данных для unit %s", unit_uuid)
+                if not successful_lookup:
+                    log_final_unit_error(
+                        context,
+                        log_prefix="metrics_op",
+                        unit_uuid=unit_uuid,
+                        error_html=last_error_html,
+                        error_status=last_error_status,
+                        empty_message="нет данных",
+                    )
                     return
 
-                for text_chunk in split_text_for_telegram(report_text):
-                    for sub in subscribers:
-                        payload = build_payload(
-                            chat_id=sub.chat_id,
-                            topic_id=sub.topic_id,
-                            post="metrics",
-                            text=text_chunk,
-                            unit_uuid=unit_uuid,
-                        )
-                        async with publish_lock:
-                            await rabbitmq.publish_async(payload)
+                if not report_text:
+                    return
 
-        try:
-            await asyncio.gather(*(process_unit(unit_uuid) for unit_uuid in unit_uuids))
-        finally:
-            dodo_api.reset_runtime()
-            dodo_api.clear_account_token_cache()
-            rabbitmq_close = getattr(rabbitmq, "close_async", None)
-            if callable(rabbitmq_close):
-                await rabbitmq_close()
+                await publish_report_to_subscribers(
+                    rabbitmq,
+                    publish_lock=publish_lock,
+                    subscribers=subscribers,
+                    post="metrics",
+                    text=report_text,
+                    unit_uuid=unit_uuid,
+                )
+
+        await asyncio.gather(*(process_unit(unit_uuid) for unit_uuid in unit_uuids))
 
 
 async def _build_metrics_report(
@@ -662,6 +615,8 @@ def _format_metrics_message(
         f"Процент долгих приготовлений: {_format_percent(long_dine_in_percent)}%",
         f"Средняя оценка заказов, сделанных в ресторане: {_format_rating(customer_ratings.avg_dine_in_order_rate, customer_ratings.dine_in_rate_count)}",
         f"Средняя оценка заказов, сделанных на доставку: {_format_rating(customer_ratings.avg_delivery_order_rate, customer_ratings.delivery_rate_count)}",
+        "",
+        "#метрики",
     ]
     return "\n".join(lines)
 

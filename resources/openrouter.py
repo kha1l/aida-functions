@@ -48,6 +48,8 @@ class OpenRouterClient:
         self.retries = retries
         self.http_referer = http_referer
         self.app_title = app_title
+        self._shared_session: Optional[aiohttp.ClientSession] = None
+        self._request_semaphore: Optional[asyncio.Semaphore] = None
 
     async def generate_greeting(
         self,
@@ -122,6 +124,21 @@ class OpenRouterClient:
             model=model,
         )
 
+    def configure_runtime(
+        self,
+        *,
+        session: Optional[aiohttp.ClientSession] = None,
+        request_semaphore: Optional[asyncio.Semaphore] = None,
+    ) -> None:
+        """Подключает общий aiohttp session для серии поздравлений в рамках одного job."""
+        self._shared_session = session
+        self._request_semaphore = request_semaphore
+
+    def reset_runtime(self) -> None:
+        """Сбрасывает временные runtime-зависимости после завершения job."""
+        self._shared_session = None
+        self._request_semaphore = None
+
     async def _request_greeting(
         self,
         *,
@@ -134,7 +151,14 @@ class OpenRouterClient:
         attempts = 0
         retries_left = self.retries
 
-        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+        if self._shared_session is not None:
+            session = self._shared_session
+            close_session = False
+        else:
+            session = aiohttp.ClientSession(timeout=timeout, trust_env=True)
+            close_session = True
+
+        try:
             while True:
                 attempts += 1
                 response_text: Optional[str] = None
@@ -142,18 +166,24 @@ class OpenRouterClient:
                 status: Optional[int] = None
 
                 try:
-                    async with session.post(
-                        url,
-                        json=payload,
-                        headers=_build_headers(
-                            api_key=self.api_key,
-                            http_referer=self.http_referer,
-                            app_title=self.app_title,
-                        ),
-                    ) as response:
-                        status = response.status
-                        response_headers = dict(response.headers)
-                        response_text = await response.text()
+                    semaphore_context = (
+                        self._request_semaphore
+                        if self._request_semaphore is not None
+                        else _null_async_context()
+                    )
+                    async with semaphore_context:
+                        async with session.post(
+                            url,
+                            json=payload,
+                            headers=_build_headers(
+                                api_key=self.api_key,
+                                http_referer=self.http_referer,
+                                app_title=self.app_title,
+                            ),
+                        ) as response:
+                            status = response.status
+                            response_headers = dict(response.headers)
+                            response_text = await response.text()
                 except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                     if retries_left > 0:
                         retries_left -= 1
@@ -222,6 +252,9 @@ class OpenRouterClient:
                     attempts=attempts,
                     request_id=_extract_request_id(response_headers),
                 )
+        finally:
+            if close_session:
+                await session.close()
 
 
 @resource(

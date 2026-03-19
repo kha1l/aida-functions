@@ -1,3 +1,4 @@
+"""Модульные Definitions для job по складским остаткам."""
 from dagster import Definitions
 
 from .jobs import stock_job

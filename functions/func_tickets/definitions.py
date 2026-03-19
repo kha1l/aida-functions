@@ -1,3 +1,4 @@
+"""Модульные Definitions для job по тикетам."""
 from dagster import Definitions
 
 from .jobs import tickets_job

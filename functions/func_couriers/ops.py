@@ -1,3 +1,4 @@
+"""Dagster ops для daily и manual-отчетов по курьерам."""
 import asyncio
 
 from dagster import Field, OpExecutionContext, op

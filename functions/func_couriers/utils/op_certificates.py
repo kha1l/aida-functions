@@ -1,3 +1,4 @@
+"""Сбор manual-отчета по сертификатам для курьеров."""
 from datetime import timedelta
 from typing import Dict, Optional
 

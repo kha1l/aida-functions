@@ -1,3 +1,4 @@
+"""Общие helper'ы manual-отчетов по delivery-направлению."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone

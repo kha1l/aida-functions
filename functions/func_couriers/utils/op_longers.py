@@ -1,3 +1,4 @@
+"""Сбор manual-отчета по долгим доставкам."""
 from __future__ import annotations
 
 import asyncio

@@ -129,6 +129,7 @@ class ReportSubscription:
     account_id: Optional[int]
     chat_id: int
     topic_id: Optional[int]
+    params: Optional[str] = None
 
 
 CouriersSubscription = ReportSubscription
@@ -158,6 +159,7 @@ async def select_report_subscriptions(
                             account_id=order.account_id,
                             chat_id=order.chat_id,
                             topic_id=order.topic_id,
+                            params=order.params,
                         )
                     )
         return subscriptions

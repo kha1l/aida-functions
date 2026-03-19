@@ -6,17 +6,17 @@ from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 from dagster import OpExecutionContext
-from functions.shared.manual_report_runtime import html_to_log_text, to_int
+from functions.shared.manual_report_runtime import to_int
+from functions.shared.report_job_runtime import (
+    load_report_job_snapshot,
+    log_auth_error,
+    log_final_unit_error,
+    publish_report_to_subscribers,
+)
+from functions.shared.unit_time import build_previous_local_day_window
 
 from config import couriers_settings, WeatherSettings, weather_settings
-from database.requests import (
-    ReportSubscription,
-    load_accounts_and_tokens_bulk,
-    load_units_by_uuids,
-    select_account_ids_for_units,
-    select_couriers_subscriptions,
-)
-from messaging import build_payload
+from database.requests import select_couriers_subscriptions
 
 
 async def run_couriers(context: OpExecutionContext) -> None:
@@ -27,44 +27,20 @@ async def run_couriers(context: OpExecutionContext) -> None:
     couriers_cfg = couriers_settings()
     weather_cfg = weather_settings()
 
-    subscriptions = await select_couriers_subscriptions(db)
-    if not subscriptions:
+    snapshot = await load_report_job_snapshot(
+        db,
+        load_subscriptions=select_couriers_subscriptions,
+    )
+    if not snapshot.subscriptions:
         context.log.info("couriers_op: нет подписок")
         return
 
-    # На старте снимаем срез подписок и кандидатов по токенам, дальше работаем в памяти.
-    subs_by_unit: Dict[str, List[ReportSubscription]] = {}
-    accounts_by_unit: Dict[str, List[int]] = {}
-    for sub in subscriptions:
-        subs_by_unit.setdefault(sub.unit_uuid, []).append(sub)
-        if sub.account_id is not None:
-            accounts_by_unit.setdefault(sub.unit_uuid, []).append(sub.account_id)
-
-    unit_uuids = list(subs_by_unit.keys())
-    units, candidate_accounts_by_unit = await asyncio.gather(
-        load_units_by_uuids(db, unit_uuids),
-        select_account_ids_for_units(
-            db,
-            unit_uuids,
-            account_ids_filter_by_unit=accounts_by_unit,
-        ),
-    )
-
-    all_account_ids = {
-        account_id
-        for account_ids in accounts_by_unit.values()
-        for account_id in account_ids
-    }
-    all_account_ids.update(
-        account_id
-        for account_ids in candidate_accounts_by_unit.values()
-        for account_id in account_ids
-    )
-    account_auth_map = await load_accounts_and_tokens_bulk(db, all_account_ids)
-    dodo_api.prime_account_token_cache(account_auth_map)
+    dodo_api.prime_account_token_cache(snapshot.account_auth_map)
 
     semaphore = asyncio.Semaphore(couriers_cfg.max_concurrent_units)
     publish_lock = asyncio.Lock()
+    unit_uuids = list(snapshot.subs_by_unit.keys())
+
     # Кеш погоды общий на весь job, чтобы несколько чатов одной точки не дублировали запрос.
     weather_tasks: Dict[Tuple[str, str], asyncio.Task[str]] = {}
     weather_tasks_lock = asyncio.Lock()
@@ -99,21 +75,15 @@ async def run_couriers(context: OpExecutionContext) -> None:
         async def process_unit(unit_uuid: str) -> None:
             """Собирает и публикует отчёт для одного заведения."""
             async with semaphore:
-                subscribers = subs_by_unit.get(unit_uuid, [])
                 try:
-                    unit = units.get(unit_uuid)
-                    order_account_ids = list({acc for acc in accounts_by_unit.get(unit_uuid, [])})
+                    subscribers = snapshot.subscribers_for(unit_uuid)
+                    unit = snapshot.unit_for(unit_uuid)
+                    unit_name = snapshot.unit_name_for(unit_uuid)
 
                     if not subscribers:
                         return
 
-                    candidate_accounts = candidate_accounts_by_unit.get(
-                        unit_uuid,
-                        [],
-                    )
-                    if not candidate_accounts:
-                        candidate_accounts = order_account_ids
-
+                    candidate_accounts = snapshot.candidate_accounts_for(unit_uuid)
                     if not candidate_accounts:
                         context.log.warning(
                             "couriers_op: нет токенов для unit %s", unit_uuid
@@ -129,19 +99,19 @@ async def run_couriers(context: OpExecutionContext) -> None:
                         latitude=unit.latitude if unit else None,
                         longitude=unit.longitude if unit else None,
                         logger=context.log,
-                        unit_name=unit.name if unit and unit.name else unit_uuid,
+                        unit_name=unit_name,
                         weather_tasks=weather_tasks,
                         weather_tasks_lock=weather_tasks_lock,
                         weather_request_semaphore=weather_request_semaphore,
                     )
 
                     for account_id in candidate_accounts:
-                        # Если один токен не сработал, пробуем следующий аккаунт, подписанный на ту же точку.
-                        account, _ = account_auth_map.get(account_id, (None, None))
+                        account = snapshot.account_for(account_id)
                         report_text, last_error_html, last_error_status = await _build_couriers_report(
                             dodo_api=dodo_api,
+                            unit=unit,
                             unit_uuid=unit_uuid,
-                            unit_name=unit.name if unit and unit.name else unit_uuid,
+                            unit_name=unit_name,
                             account_id=account_id,
                             market_code=_extract_market_code(
                                 account.properties if account else None
@@ -150,52 +120,41 @@ async def run_couriers(context: OpExecutionContext) -> None:
                         )
                         if report_text:
                             break
-                        if last_error_html and last_error_status in {401, 403}:
-                            context.log.warning(
-                                "couriers_op: ошибка Dodo API для unit %s, account_id=%s: %s",
-                                unit_uuid,
-                                account_id,
-                                html_to_log_text(last_error_html),
-                            )
+                        log_auth_error(
+                            context,
+                            log_prefix="couriers_op",
+                            unit_uuid=unit_uuid,
+                            account_id=account_id,
+                            error_html=last_error_html,
+                            error_status=last_error_status,
+                        )
 
                     if not report_text:
-                        if last_error_html:
-                            if last_error_status in {429, 500}:
-                                context.log.error(
-                                    "couriers_op: не удалось собрать отчет для unit %s после retry: %s",
-                                    unit_uuid,
-                                    html_to_log_text(last_error_html),
-                                )
-                            elif last_error_status not in {401, 403}:
-                                context.log.error(
-                                    "couriers_op: не удалось собрать отчет для unit %s: %s",
-                                    unit_uuid,
-                                    html_to_log_text(last_error_html),
-                                )
-                        else:
-                            context.log.warning(
-                                "couriers_op: нет данных для unit %s", unit_uuid
-                            )
+                        log_final_unit_error(
+                            context,
+                            log_prefix="couriers_op",
+                            unit_uuid=unit_uuid,
+                            error_html=last_error_html,
+                            error_status=last_error_status,
+                            empty_message="нет данных",
+                        )
                         return
 
-                    for sub in subscribers:
-                        payload = build_payload(
-                            chat_id=sub.chat_id,
-                            topic_id=sub.topic_id,
-                            post="couriers",
-                            text=report_text,
-                            unit_uuid=unit_uuid,
-                        )
-                        async with publish_lock:
-                            await rabbitmq.publish_async(payload)
+                    await publish_report_to_subscribers(
+                        rabbitmq,
+                        publish_lock=publish_lock,
+                        subscribers=subscribers,
+                        post="couriers",
+                        text=report_text,
+                        unit_uuid=unit_uuid,
+                    )
                 except Exception as exc:  # noqa: BLE001
                     context.log.error(
                         "couriers_op: ошибка обработки unit %s: %s", unit_uuid, exc
                     )
 
         try:
-            tasks = [process_unit(unit_uuid) for unit_uuid in unit_uuids]
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*(process_unit(unit_uuid) for unit_uuid in unit_uuids))
         finally:
             dodo_api.reset_runtime()
             dodo_api.clear_account_token_cache()
@@ -207,6 +166,7 @@ async def run_couriers(context: OpExecutionContext) -> None:
 async def _build_couriers_report(
     *,
     dodo_api,
+    unit,
     unit_uuid: str,
     unit_name: str,
     account_id: int,
@@ -214,8 +174,7 @@ async def _build_couriers_report(
     weather_text: str,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
     """Собирает итоговый текст отчёта по доставке для одной точки."""
-    dt_end = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    dt_start = dt_end - timedelta(days=1)
+    dt_start, dt_end = build_previous_local_day_window(unit)
     date_label = dt_start.strftime("%d.%m")
 
     params_base = {

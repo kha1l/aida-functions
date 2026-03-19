@@ -1,15 +1,15 @@
 # aida_functions
 
-`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API, OpenRouter и публикует готовые payload в RabbitMQ.
+`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API и OpenRouter и публикует готовые payload в RabbitMQ.
 
 ## Что внутри
 
-- daily jobs по расписанию: курьеры, ресторан, отказы, дни рождения, юбилеи/стаж и другие;
+- daily jobs по расписанию: курьеры, ресторан, метрики, отказы, брак, списания, дни рождения, юбилеи/стаж и другие;
 - manual jobs без расписания, которые запускаются из `aida3` по нажатию кнопок;
 - shared Dagster-ресурсы для БД, RabbitMQ, Dodo API и OpenRouter;
-- bulk-запросы к БД в `database/requests.py`;
-- общая логика runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`;
-- единый набор resource definitions для модульных `Definitions` в `functions/shared/definition_resources.py`.
+- bulk-запросы к БД в `database/requests.py`, чтобы job'ы меньше дергали PostgreSQL;
+- общий runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`;
+- единый набор ресурсов для модульных `Definitions` в `functions/shared/definition_resources.py`.
 
 ## Основные директории
 
@@ -20,22 +20,26 @@
 | `database/` | SQLAlchemy-модели, engine и bulk-запросы |
 | `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api`, `openrouter` |
 | `messaging.py` | Формирование и публикация payload в RabbitMQ |
-| `functions/func_couriers/` | Отчеты по курьерам и delivery-manual jobs |
-| `functions/func_stationary/` | Отчеты по ресторану и stationary-manual jobs |
+| `functions/func_couriers/` | Daily-отчет по курьерам и delivery-manual jobs |
+| `functions/func_stationary/` | Daily-отчет по ресторану и stationary-manual jobs |
+| `functions/func_defect/` | Hourly-отчет по браку |
+| `functions/func_writeoff/` | Daily-отчет по списаниям |
 | `functions/shared/` | Общий runtime и shared helpers для job'ов |
 
 ## Daily jobs
 
 - `birthday_job`
 - `couriers_job`
+- `defect_job` — hourly-отчет по браку за предыдущий завершенный локальный час точки, если за час набралось `3+` позиций брака
 - `metrics_job` — запускается каждый час и отправляет отчет только тем точкам, у которых локальное время равно `14:00`, `19:00` или `23:00`
-- `refusal_job`
+- `refusal_job` — hourly-отчет по отмененным заказам за предыдущий завершенный локальный час точки
 - `revenue_job`
-- `staff_job`
+- `staff_job` — ежедневный отчет по юбилеям и годовщинам работы с поздравлениями через OpenRouter
 - `stationary_job`
-- `stock_job`
+- `stock_job` — запускается каждый час и отправляет отчет только точкам, у которых локальное время равно `08:00` или `15:00`
 - `stops_job`
 - `tickets_job`
+- `writeoff_job` — daily-отчет по списаниям за предыдущий полный локальный день точки
 
 ## Manual jobs
 
@@ -67,11 +71,6 @@
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-Запуск Dagster UI и job'ов локально:
-
-```bash
 dagster dev -m defs
 ```
 
@@ -143,36 +142,3 @@ dagster job execute -m defs -j couriers_job
 - `functions/shared/manual_report_runtime.py` дает единый lifecycle для manual-отчетов.
 - `functions/shared/definition_resources.py` не дает модульным `definitions.py` разъехаться по набору ресурсов.
 - `aida3` запускает manual jobs через Dagster GraphQL и получает готовые сообщения из очереди.
-
-## Что уже автоматизировано
-
-- `birthday_job` — ежедневный отчет по дням рождения с короткими поздравлениями через OpenRouter
-- `staff_job` — ежедневный отчет по юбилеям и годовщинам работы с поздравлениями через OpenRouter
-- `refusal_job` — hourly-отчет по отмененным заказам за предыдущий завершенный локальный час точки
-
-## OpenRouter в job
-
-Для будущих job'ов с поздравлениями можно использовать ресурс `openrouter` прямо из op:
-
-```python
-from dagster import OpExecutionContext, op
-
-
-@op(required_resource_keys={"openrouter"})
-async def birthday_ai_op(context: OpExecutionContext):
-    result = await context.resources.openrouter.generate_greeting(
-        employee_name="Иван Иванов",
-        occasion="день рождения",
-        details=[
-            "работает в компании 5 лет",
-            "любит помогать новичкам",
-        ],
-    )
-
-    if not result.ok:
-        context.log.error(result.error_html or "OpenRouter request failed")
-        return
-
-    text = result.text or ""
-    context.log.info(text)
-```

@@ -10,6 +10,7 @@
 Добавленные пакеты под ваши файлы:
 - `func_birthday`
 - `func_couriers`
+- `func_defect`
 - `func_metrics`
 - `func_refusal`
 - `func_revenue`
@@ -18,6 +19,7 @@
 - `func_stock`
 - `func_stops`
 - `func_tickets`
+- `func_writeoff`
 
 Сейчас все модульные `definitions.py` используют общий словарь ресурсов из
 `functions/shared/definition_resources.py`, чтобы их можно было запускать отдельно

@@ -1,3 +1,4 @@
+"""Сбор manual-отчета по ожиданиям курьеров."""
 from __future__ import annotations
 
 from dataclasses import dataclass

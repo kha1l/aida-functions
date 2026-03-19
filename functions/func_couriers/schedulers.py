@@ -1,3 +1,4 @@
+"""Расписание для ежедневного отчета по курьерам."""
 from dagster import ScheduleDefinition
 
 from config import schedule_config

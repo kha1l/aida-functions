@@ -1,3 +1,4 @@
+"""Модульные Definitions для job по ключевым метрикам."""
 from dagster import Definitions
 
 from .jobs import metrics_job

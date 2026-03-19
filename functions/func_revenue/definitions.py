@@ -1,3 +1,4 @@
+"""Модульные Definitions для job по выручке сети."""
 from dagster import Definitions
 
 from .jobs import revenue_job

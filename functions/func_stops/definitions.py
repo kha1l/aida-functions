@@ -1,3 +1,4 @@
+"""Модульные Definitions для job по стопам."""
 from dagster import Definitions
 
 from .jobs import stops_job

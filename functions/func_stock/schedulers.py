@@ -4,7 +4,8 @@ from config import schedule_config
 from .jobs import stock_job
 
 
-_cfg = schedule_config("stock", default_cron="0 9 * * *")
+# Запускаем каждый час и внутри фильтруем точки по локальным часам 08/15.
+_cfg = schedule_config("stock", default_cron="0 * * * *")
 stock_schedule = None
 if _cfg.enabled:
     stock_schedule = ScheduleDefinition(
