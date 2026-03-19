@@ -1,3 +1,5 @@
+"""Корневой Dagster Definitions для всех jobs, schedules и shared-ресурсов."""
+
 from dagster import Definitions
 
 from resources import db_resource, dodo_api_resource, rabbitmq_resource
@@ -14,7 +16,7 @@ from functions.func_revenue.jobs import revenue_job
 from functions.func_revenue.schedulers import revenue_schedule
 from functions.func_staff.jobs import staff_job
 from functions.func_staff.schedulers import staff_schedule
-from functions.func_stationary.jobs import stationary_job
+from functions.func_stationary.jobs import assembly_rest_job, drink_rest_job, later_rest_job, stationary_job
 from functions.func_stationary.schedulers import stationary_schedule
 from functions.func_stock.jobs import stock_job
 from functions.func_stock.schedulers import stock_schedule
@@ -26,6 +28,7 @@ from functions.func_tickets.jobs import tickets_job
 from functions.func_tickets.schedulers import tickets_schedule
 
 
+# Все job'ы регистрируем централизованно, чтобы `dagster dev -m defs` видел их сразу.
 _jobs = [
     birthday_job,
     certificates_job,
@@ -38,6 +41,9 @@ _jobs = [
     refusal_job,
     revenue_job,
     staff_job,
+    assembly_rest_job,
+    drink_rest_job,
+    later_rest_job,
     stationary_job,
     stock_job,
     stops_job,
@@ -45,6 +51,7 @@ _jobs = [
     tickets_job,
 ]
 
+# Manual-job'ы без расписания сюда не добавляем специально.
 _schedules = [
     birthday_schedule,
     couriers_schedule,
@@ -60,6 +67,7 @@ _schedules = [
 ]
 
 
+# Общие ресурсы доступны во всех функциях через required_resource_keys.
 resource_defs = {
     "db": db_resource,
     "dodo_api": dodo_api_resource,

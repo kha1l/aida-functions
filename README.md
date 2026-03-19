@@ -1,40 +1,29 @@
 # aida_functions
 
-`aida_functions` — Dagster-сервис с набором jobs для отчётов и уведомлений Aida.  
-Он читает данные из PostgreSQL, при необходимости запрашивает Dodo API и публикует готовые сообщения в RabbitMQ для дальнейшей отправки в Telegram.
+`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API и публикует готовые payload в RabbitMQ.
 
-## Что делает сервис
+## Что внутри
 
-- регистрирует Dagster jobs и schedules через `defs.py`;
-- предоставляет ресурсы `db`, `rabbitmq` и `dodo_api`;
-- собирает payload для очереди через `messaging.py`;
-- хранит SQLAlchemy-модели и bulk-запросы в директории `database/`;
-- содержит отдельные пакеты `functions/func_*` для каждого типа отчёта.
+- daily jobs по расписанию: курьеры, ресторан, метрики, стопы, тикеты и другие;
+- manual jobs без расписания, которые запускаются из `aida3` по нажатию кнопок;
+- shared Dagster-ресурсы для БД, RabbitMQ и Dodo API;
+- bulk-запросы к БД в `database/requests.py`;
+- общая логика runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`.
 
-## Стек
-
-- Python 3.12
-- Dagster
-- SQLAlchemy + asyncpg
-- aio-pika
-- aiohttp
-
-## Структура проекта
+## Основные директории
 
 | Путь | Назначение |
 | --- | --- |
-| `defs.py` | Корневой `Definitions` с jobs, schedules и ресурсами |
-| `config.py` | Загрузка настроек из env |
-| `connection.py` | Фабрики подключения к БД и RabbitMQ вне Dagster-ресурсов |
-| `messaging.py` | Валидация payload и публикация сообщений в RabbitMQ |
-| `resources/database.py` | Dagster-ресурс БД |
-| `resources/rabbitmq.py` | Dagster-ресурс RabbitMQ |
-| `resources/dodo_api.py` | Async-клиент и Dagster-ресурс для Dodo API |
-| `database/models.py` | SQLAlchemy-модели схем `special` и `aida` |
-| `database/requests.py` | Bulk-запросы к БД для jobs |
-| `functions/func_*` | Пакеты с `ops.py`, `jobs.py`, `definitions.py`, `schedulers.py` |
+| `defs.py` | Корневой `Definitions` со всеми jobs, schedules и ресурсами |
+| `config.py` | Настройки из env |
+| `database/` | SQLAlchemy-модели, engine и bulk-запросы |
+| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api` |
+| `messaging.py` | Формирование и публикация payload в RabbitMQ |
+| `functions/func_couriers/` | Отчеты по курьерам и delivery-manual jobs |
+| `functions/func_stationary/` | Отчеты по ресторану и stationary-manual jobs |
+| `functions/shared/` | Общий runtime и shared helpers для job'ов |
 
-## Доступные jobs
+## Daily jobs
 
 - `birthday_job`
 - `couriers_job`
@@ -48,7 +37,31 @@
 - `tariff_job`
 - `tickets_job`
 
-## Установка
+## Manual jobs
+
+### Delivery / couriers
+
+- `certificates_job`
+- `later_job`
+- `waiting_job`
+- `sectors_job`
+- `longers_job`
+
+### Stationary
+
+- `later_rest_job`
+- `assembly_rest_job`
+- `drink_rest_job`
+
+## Как это работает
+
+1. Job получает подписки и связанные аккаунты из PostgreSQL.
+2. Для каждой точки выбирается рабочий токен Dodo API.
+3. Собирается один или несколько текстовых блоков отчета.
+4. Для каждого подписчика строится payload вида `chat_id + post + text + topic_id + unit_uuid`.
+5. Payload публикуется в RabbitMQ, откуда его забирает `aida3`.
+
+## Локальный запуск
 
 ```bash
 python3 -m venv .venv
@@ -56,9 +69,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Запуск
-
-Локальная разработка:
+Запуск Dagster UI и job'ов локально:
 
 ```bash
 dagster dev -m defs
@@ -70,16 +81,14 @@ dagster dev -m defs
 dagster job execute -m defs -j couriers_job
 ```
 
-Docker/gRPC:
+## Основные переменные окружения
 
-```bash
-docker build -t aida-functions .
-docker run --env-file .env -p 4000:4000 aida-functions
-```
+### PostgreSQL
 
-Контейнер стартует командой `dagster api grpc -m defs`.
-
-## Переменные окружения
+- `DATABASE_URL`
+- или `DBASE_NAME`, `DBASE_USER`, `DBASE_PASSWORD`, `DBASE_HOST`, `DBASE_PORT`, `DBASE_DRIVER`
+- `DATABASE_ECHO`
+- `DATABASE_POOL_PRE_PING`
 
 ### RabbitMQ
 
@@ -91,25 +100,13 @@ docker run --env-file .env -p 4000:4000 aida-functions
 - `RABBIT_DURABLE`
 - `RABBIT_ENABLED`
 
-### База данных
-
-Поддерживаются два варианта конфигурации:
-
-- `DATABASE_URL`
-- или набор `DBASE_NAME`, `DBASE_USER`, `DBASE_PASSWORD`, `DBASE_HOST`, `DBASE_PORT`, `DBASE_DRIVER`
-
-Дополнительно:
-
-- `DATABASE_ECHO`
-- `DATABASE_POOL_PRE_PING`
-
 ### Dodo API
 
 - `DODO_API_TIMEOUT_SECONDS`
 - `DODO_API_RETRIES_500`
 - `DODO_API_MAX_CONCURRENT_REQUESTS`
 
-Токены и account-данные для Dodo API читаются из таблиц БД.
+Токены и `account.properties` читаются из БД.
 
 ### Couriers и погода
 
@@ -121,21 +118,16 @@ docker run --env-file .env -p 4000:4000 aida-functions
 - `WEATHER_API_RETRIES`
 - `WEATHER_MAX_CONCURRENT_REQUESTS`
 
-Погодные данные используются в `func_couriers`; координаты точек берутся из `special.units`.
-
-### Расписания
-
-Для каждого job доступны переменные:
+### Schedules
 
 - `SCHEDULE_<NAME>_CRON`
 - `SCHEDULE_<NAME>_TZ`
 - `SCHEDULE_<NAME>_ENABLED`
+- `SCHEDULE_TZ_DEFAULT`
 
-Общий timezone по умолчанию задаётся через `SCHEDULE_TZ_DEFAULT`.
+## Полезные детали
 
-## Примечания
-
-- Основная точка интеграции с очередью — `RabbitMQPublisher.publish_async()`.
-- `resources/dodo_api.py` поддерживает retry, shared `aiohttp` session и ограничение параллелизма запросов.
-- `database/requests.py` содержит bulk-запросы и retry на временных DB-ошибках.
-- `func_couriers` дополнительно собирает погодный прогноз и переиспользует общие runtime-ресурсы в рамках job.
+- `resources/dodo_api.py` умеет retry на `429/500`, сетевые ошибки и shared `aiohttp` session.
+- `database/requests.py` строит bulk-выборки, чтобы job'ы меньше ходили в БД.
+- `functions/shared/manual_report_runtime.py` дает единый lifecycle для manual-отчетов.
+- `aida3` запускает manual jobs через Dagster GraphQL и получает готовые сообщения из очереди.

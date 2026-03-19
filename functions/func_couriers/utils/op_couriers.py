@@ -1,11 +1,12 @@
+"""Ежедневный job по курьерам: сбор метрик, погоды и отправка отчетов подписчикам."""
+
 import asyncio
-import html
-import re
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 from dagster import OpExecutionContext
+from functions.shared.manual_report_runtime import html_to_log_text, to_int
 
 from config import couriers_settings, WeatherSettings, weather_settings
 from database.requests import (
@@ -31,6 +32,7 @@ async def run_couriers(context: OpExecutionContext) -> None:
         context.log.info("couriers_op: нет подписок")
         return
 
+    # На старте снимаем срез подписок и кандидатов по токенам, дальше работаем в памяти.
     subs_by_unit: Dict[str, List[ReportSubscription]] = {}
     accounts_by_unit: Dict[str, List[int]] = {}
     for sub in subscriptions:
@@ -63,6 +65,7 @@ async def run_couriers(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(couriers_cfg.max_concurrent_units)
     publish_lock = asyncio.Lock()
+    # Кеш погоды общий на весь job, чтобы несколько чатов одной точки не дублировали запрос.
     weather_tasks: Dict[Tuple[str, str], asyncio.Task[str]] = {}
     weather_tasks_lock = asyncio.Lock()
     weather_request_semaphore = asyncio.Semaphore(
@@ -133,6 +136,7 @@ async def run_couriers(context: OpExecutionContext) -> None:
                     )
 
                     for account_id in candidate_accounts:
+                        # Если один токен не сработал, пробуем следующий аккаунт, подписанный на ту же точку.
                         account, _ = account_auth_map.get(account_id, (None, None))
                         report_text, last_error_html, last_error_status = await _build_couriers_report(
                             dodo_api=dodo_api,
@@ -151,7 +155,7 @@ async def run_couriers(context: OpExecutionContext) -> None:
                                 "couriers_op: ошибка Dodo API для unit %s, account_id=%s: %s",
                                 unit_uuid,
                                 account_id,
-                                _html_to_log_text(last_error_html),
+                                html_to_log_text(last_error_html),
                             )
 
                     if not report_text:
@@ -160,13 +164,13 @@ async def run_couriers(context: OpExecutionContext) -> None:
                                 context.log.error(
                                     "couriers_op: не удалось собрать отчет для unit %s после retry: %s",
                                     unit_uuid,
-                                    _html_to_log_text(last_error_html),
+                                    html_to_log_text(last_error_html),
                                 )
                             elif last_error_status not in {401, 403}:
                                 context.log.error(
                                     "couriers_op: не удалось собрать отчет для unit %s: %s",
                                     unit_uuid,
-                                    _html_to_log_text(last_error_html),
+                                    html_to_log_text(last_error_html),
                                 )
                         else:
                             context.log.warning(
@@ -337,18 +341,11 @@ def _work_couriers_orders(
             counts[2] += 1
 
         order_id = order.get("orderId")
-        delivery_time = _to_int(order.get("deliveryTime"))
+        delivery_time = to_int(order.get("deliveryTime"))
         if isinstance(order_id, str) and order_id and delivery_time is not None:
             delivery_times_by_order_id[order_id] = delivery_time
 
     return counts, delivery_times_by_order_id
-
-
-def _html_to_log_text(value: str) -> str:
-    """Очищает HTML-ошибку до плоского текста для логов."""
-    cleaned = re.sub(r"<[^>]+>", " ", value)
-    cleaned = html.unescape(cleaned)
-    return " ".join(cleaned.split())
 
 
 def _extract_productivity(request: Dict[str, object]) -> float:
@@ -434,7 +431,7 @@ def _calculate_long_deliveries_percent(
     """Считает долю долгих доставок относительно всех delivery orders."""
     stats_list = statistics.get("unitsStatistics", [])
     stats = stats_list[0] if stats_list else {}
-    delivery_orders_count = _to_int(stats.get("deliveryOrdersCount")) or 0
+    delivery_orders_count = to_int(stats.get("deliveryOrdersCount")) or 0
     if delivery_orders_count <= 0:
         return 0.0
 
@@ -442,6 +439,7 @@ def _calculate_long_deliveries_percent(
     long_deliveries_count = 0
     seen_order_ids = set()
 
+    # orders-handover-time может содержать несколько записей, поэтому считаем каждый orderId один раз.
     for order in handover.get("ordersHandoverTime", []) or []:
         if not isinstance(order, dict):
             continue
@@ -457,9 +455,9 @@ def _calculate_long_deliveries_percent(
         if delivery_time is None:
             continue
 
-        tracking_pending_time = _to_int(order.get("trackingPendingTime")) or 0
-        cooking_time = _to_int(order.get("cookingTime")) or 0
-        heated_shelf_time = _to_int(order.get("heatedShelfTime")) or 0
+        tracking_pending_time = to_int(order.get("trackingPendingTime")) or 0
+        cooking_time = to_int(order.get("cookingTime")) or 0
+        heated_shelf_time = to_int(order.get("heatedShelfTime")) or 0
         meeting_time = tracking_pending_time + cooking_time + heated_shelf_time
 
         if delivery_time + meeting_time > threshold_seconds:
@@ -489,16 +487,6 @@ def _extract_market_code(properties: Optional[str]) -> Optional[str]:
 def _format_percent(value: float) -> str:
     """Форматирует процент без лишних нулей в конце."""
     return f"{value:.2f}".rstrip("0").rstrip(".")
-
-
-def _to_int(value: object) -> Optional[int]:
-    """Безопасно преобразует произвольное значение в int."""
-    try:
-        if value is None:
-            return None
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 async def _build_weather_text(
@@ -548,6 +536,7 @@ async def _get_weather_text_cached(
     if not weather_cfg.api_key or not latitude or not longitude:
         return _weather_unavailable_text("координаты или API-ключ не настроены")
 
+    # Ключуем кеш именно по координатам, чтобы близкие по времени отчеты не дергали API повторно.
     cache_key = (latitude, longitude)
     cached_task = weather_tasks.get(cache_key)
     if cached_task is None:

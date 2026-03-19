@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 import asyncio
-import html
-import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import aiohttp
 from dagster import OpExecutionContext
 
-from database.requests import load_accounts_and_tokens_bulk, load_units_by_uuids
-from messaging import build_payload
+from .manual_report_common import (
+    ManualCourierReportRequest,
+    build_report_window,
+    format_staff_name,
+    parse_dodo_datetime,
+    run_manual_courier_report,
+)
 
-TELEGRAM_MESSAGE_LIMIT = 4096
-SAFE_TELEGRAM_CHUNK = 4000
 LATE_THRESHOLD_MINUTES = 10
 PAGE_SIZE = 990
 
@@ -41,112 +41,30 @@ class ActualShift:
 
 async def run_later(context: OpExecutionContext) -> None:
     """Собирает и отправляет отчет по опозданиям/прогулам для одной точки."""
-    db = context.resources.db
-    rabbitmq = context.resources.rabbitmq
-    dodo_api = context.resources.dodo_api
-
-    op_config = context.op_config
-    unit_uuid = op_config["unit_uuid"]
-    account_id = op_config["account_id"]
-    chat_id = op_config["chat_id"]
-    topic_id = op_config.get("topic_id")
-    message_date = op_config.get("message_date")
-
-    units = await load_units_by_uuids(db, [unit_uuid])
-    unit = units.get(unit_uuid)
-    unit_name = unit.name if unit and unit.name else unit_uuid
-
-    account_auth_map = await load_accounts_and_tokens_bulk(db, {account_id})
-    dodo_api.prime_account_token_cache(account_auth_map)
-
-    request_semaphore = None
-    if getattr(dodo_api, "max_concurrent_requests", None):
-        request_semaphore = asyncio.Semaphore(max(1, dodo_api.max_concurrent_requests))
-
-    report_text: Optional[str] = None
-    last_error_html: Optional[str] = None
-    last_error_status: Optional[int] = None
-
-    dodo_timeout = aiohttp.ClientTimeout(total=dodo_api.timeout_seconds)
-    async with aiohttp.ClientSession(timeout=dodo_timeout, trust_env=True) as dodo_session:
-        dodo_api.configure_runtime(
-            session=dodo_session,
-            request_semaphore=request_semaphore,
-        )
-        rabbitmq_open = getattr(rabbitmq, "open_async", None)
-        if callable(rabbitmq_open):
-            await rabbitmq_open()
-
-        try:
-            report_text, last_error_html, last_error_status = await _build_later_report(
-                dodo_api=dodo_api,
-                unit_uuid=unit_uuid,
-                unit_name=unit_name,
-                account_id=account_id,
-                message_date=message_date,
-            )
-
-            if not report_text:
-                if last_error_html:
-                    if last_error_status in {401, 403}:
-                        context.log.warning(
-                            "later_op: ошибка Dodo API для unit %s, account_id=%s: %s",
-                            unit_uuid,
-                            account_id,
-                            _html_to_log_text(last_error_html),
-                        )
-                    elif last_error_status in {429, 500}:
-                        context.log.error(
-                            "later_op: не удалось собрать отчет для unit %s после retry: %s",
-                            unit_uuid,
-                            _html_to_log_text(last_error_html),
-                        )
-                    else:
-                        context.log.error(
-                            "later_op: не удалось собрать отчет для unit %s: %s",
-                            unit_uuid,
-                            _html_to_log_text(last_error_html),
-                        )
-                else:
-                    context.log.warning("later_op: нет данных для unit %s", unit_uuid)
-                return
-
-            for text_chunk in _split_text_for_telegram(report_text):
-                payload = build_payload(
-                    chat_id=chat_id,
-                    topic_id=topic_id,
-                    post="later",
-                    text=text_chunk,
-                    unit_uuid=unit_uuid,
-                )
-                await rabbitmq.publish_async(payload)
-        finally:
-            dodo_api.reset_runtime()
-            dodo_api.clear_account_token_cache()
-            rabbitmq_close = getattr(rabbitmq, "close_async", None)
-            if callable(rabbitmq_close):
-                await rabbitmq_close()
+    await run_manual_courier_report(
+        context,
+        post="later",
+        log_prefix="later_op",
+        build_report=_build_later_report,
+    )
 
 
 async def _build_later_report(
     *,
     dodo_api,
-    unit_uuid: str,
-    unit_name: str,
-    account_id: int,
-    message_date: Optional[str],
+    request: ManualCourierReportRequest,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
-    dt_start, dt_end, date_label = _build_report_window(message_date)
+    dt_start, dt_end, date_label = build_report_window(request.message_date)
 
     schedule_params = {
-        "units": unit_uuid,
+        "units": request.unit_uuid,
         "staffType": "Courier",
         "beginFrom": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),
         "beginTo": dt_end.strftime("%Y-%m-%dT%H:%M:%S"),
         "take": PAGE_SIZE,
     }
     shifts_params = {
-        "units": unit_uuid,
+        "units": request.unit_uuid,
         "staffTypeName": "Courier",
         "clockInFrom": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),
         "clockInTo": dt_end.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -154,8 +72,8 @@ async def _build_later_report(
     }
 
     schedules_result, shifts_result = await asyncio.gather(
-        dodo_api.get(account_id, "staff/schedules", params=schedule_params),
-        dodo_api.get(account_id, "staff/shifts", params=shifts_params),
+        dodo_api.get(request.account_id, "staff/schedules", params=schedule_params),
+        dodo_api.get(request.account_id, "staff/shifts", params=shifts_params),
     )
 
     if not schedules_result.ok:
@@ -165,16 +83,16 @@ async def _build_later_report(
 
     staff_cache = await _load_staff_cache(
         dodo_api=dodo_api,
-        account_id=account_id,
-        unit_uuid=unit_uuid,
+        account_id=request.account_id,
+        unit_uuid=request.unit_uuid,
     )
 
     schedule_entries = _extract_schedules(schedules_result.data)
     shift_entries = _extract_shifts(shifts_result.data)
     report_text = await _format_later_message(
         dodo_api=dodo_api,
-        account_id=account_id,
-        unit_name=unit_name,
+        account_id=request.account_id,
+        unit_name=request.unit_name,
         date_label=date_label,
         schedules=schedule_entries,
         shifts=shift_entries,
@@ -208,7 +126,7 @@ async def _load_staff_cache(
         if not isinstance(staff_id, str) or not staff_id:
             continue
         staff_cache[staff_id] = StaffProfile(
-            full_name=_format_staff_name(member, fallback=staff_id),
+            full_name=format_staff_name(member, fallback=staff_id),
             sex=_normalize_sex(member.get("sex")),
         )
     return staff_cache
@@ -225,8 +143,8 @@ def _extract_schedules(data: object) -> Dict[str, List[ScheduledShift]]:
         staff_id = raw_schedule.get("staffId")
         if not isinstance(staff_id, str) or not staff_id:
             continue
-        start_at = _parse_dodo_datetime(raw_schedule.get("scheduledShiftStartAtLocal"))
-        end_at = _parse_dodo_datetime(raw_schedule.get("scheduledShiftEndAtLocal"))
+        start_at = parse_dodo_datetime(raw_schedule.get("scheduledShiftStartAtLocal"))
+        end_at = parse_dodo_datetime(raw_schedule.get("scheduledShiftEndAtLocal"))
         if start_at is None or end_at is None or end_at <= start_at:
             continue
         schedules_by_staff.setdefault(staff_id, []).append(
@@ -253,14 +171,14 @@ def _extract_shifts(data: object) -> List[ActualShift]:
         staff_id = raw_shift.get("staffId")
         if not isinstance(staff_id, str) or not staff_id:
             continue
-        clock_in_at = _parse_dodo_datetime(raw_shift.get("clockInAtLocal"))
+        clock_in_at = parse_dodo_datetime(raw_shift.get("clockInAtLocal"))
         if clock_in_at is None:
             continue
         shifts.append(
             ActualShift(
                 staff_id=staff_id,
                 clock_in_at=clock_in_at,
-                clock_out_at=_parse_dodo_datetime(raw_shift.get("clockOutAtLocal")),
+                clock_out_at=parse_dodo_datetime(raw_shift.get("clockOutAtLocal")),
             )
         )
 
@@ -375,7 +293,7 @@ async def _get_staff_profile(
         return profile
 
     profile = StaffProfile(
-        full_name=_format_staff_name(member_result.data, fallback=staff_id),
+        full_name=format_staff_name(member_result.data, fallback=staff_id),
         sex=_normalize_sex(member_result.data.get("sex")),
     )
     staff_cache[staff_id] = profile
@@ -403,43 +321,6 @@ def _schedule_distance(schedule: ScheduledShift, shift: ActualShift) -> Tuple[fl
     return start_gap, end_gap
 
 
-def _build_report_window(message_date: Optional[str]) -> Tuple[datetime, datetime, str]:
-    reference_dt = _parse_reference_datetime(message_date) or datetime.now()
-    dt_end = reference_dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
-    dt_start = dt_end - timedelta(days=1)
-    return dt_start, dt_end, dt_start.strftime("%d.%m")
-
-
-def _split_text_for_telegram(text: str) -> List[str]:
-    if len(text) <= TELEGRAM_MESSAGE_LIMIT:
-        return [text]
-
-    chunks: List[str] = []
-    current = text
-    while len(current) > SAFE_TELEGRAM_CHUNK:
-        split_at = current.rfind("\n", 0, SAFE_TELEGRAM_CHUNK)
-        if split_at <= 0:
-            split_at = SAFE_TELEGRAM_CHUNK
-        chunks.append(current[:split_at].rstrip())
-        current = current[split_at:].lstrip()
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def _html_to_log_text(value: str) -> str:
-    cleaned = re.sub(r"<[^>]+>", " ", value)
-    cleaned = html.unescape(cleaned)
-    return " ".join(cleaned.split())
-
-
-def _format_staff_name(member: Dict[str, object], *, fallback: str) -> str:
-    first_name = str(member.get("firstName") or "").strip()
-    last_name = str(member.get("lastName") or "").strip()
-    full_name = " ".join(part for part in [last_name, first_name] if part).strip()
-    return full_name or f"Сотрудник {fallback}"
-
-
 def _normalize_sex(value: object) -> Optional[str]:
     if value in {"Male", "Female"}:
         return str(value)
@@ -460,34 +341,3 @@ def _format_minutes(minutes: int) -> str:
         rest_minutes = minutes % 60
         return f"{hours}ч. {rest_minutes}м."
     return f"{minutes} м."
-
-
-def _parse_dodo_datetime(value: object) -> Optional[datetime]:
-    if not isinstance(value, str) or not value:
-        return None
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        try:
-            parsed = datetime.strptime(value.split(".", 1)[0], "%Y-%m-%dT%H:%M:%S")
-        except ValueError:
-            return None
-    if parsed.tzinfo is not None:
-        return parsed.astimezone().replace(tzinfo=None)
-    return parsed
-
-
-def _parse_reference_datetime(value: object) -> Optional[datetime]:
-    if isinstance(value, datetime):
-        return value.replace(tzinfo=None) if value.tzinfo else value
-    if not isinstance(value, str) or not value:
-        return None
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is not None:
-        return parsed.astimezone().replace(tzinfo=None)
-    return parsed
