@@ -122,8 +122,8 @@ async def load_account_and_token(
 
 
 @dataclass(frozen=True)
-class CouriersSubscription:
-    """Подписка на отчет couriers по конкретной точке."""
+class ReportSubscription:
+    """Подписка на отчет по конкретной точке."""
 
     unit_uuid: str
     account_id: Optional[int]
@@ -131,14 +131,20 @@ class CouriersSubscription:
     topic_id: Optional[int]
 
 
-async def select_couriers_subscriptions(db: DatabaseResource) -> List[CouriersSubscription]:
-    """Возвращает список подписок couriers с разворотом uuids."""
-    async def _action() -> List[CouriersSubscription]:
+CouriersSubscription = ReportSubscription
+
+
+async def select_report_subscriptions(
+    db: DatabaseResource,
+    post: str,
+) -> List[ReportSubscription]:
+    """Возвращает список подписок по post с разворотом uuids."""
+    async def _action() -> List[ReportSubscription]:
         """Разворачивает записи orders в список подписок по заведениям."""
         sessionmaker = db.get_sessionmaker()
-        subscriptions: List[CouriersSubscription] = []
+        subscriptions: List[ReportSubscription] = []
         async with sessionmaker() as session:
-            orders_stmt = select(Orders).where(Orders.post == "couriers")
+            orders_stmt = select(Orders).where(Orders.post == post)
             orders = (await session.execute(orders_stmt)).scalars().all()
             for order in orders:
                 if not order.uuids:
@@ -147,7 +153,7 @@ async def select_couriers_subscriptions(db: DatabaseResource) -> List[CouriersSu
                     if not unit_uuid:
                         continue
                     subscriptions.append(
-                        CouriersSubscription(
+                        ReportSubscription(
                             unit_uuid=unit_uuid,
                             account_id=order.account_id,
                             chat_id=order.chat_id,
@@ -157,10 +163,15 @@ async def select_couriers_subscriptions(db: DatabaseResource) -> List[CouriersSu
         return subscriptions
 
     return await _run_with_retry(
-        operation_name="select_couriers_subscriptions",
-        context="post=couriers",
+        operation_name="select_report_subscriptions",
+        context=f"post={post}",
         action=_action,
     )
+
+
+async def select_couriers_subscriptions(db: DatabaseResource) -> List[ReportSubscription]:
+    """Возвращает список подписок couriers с разворотом uuids."""
+    return await select_report_subscriptions(db, "couriers")
 
 
 async def load_units_by_uuids(db: DatabaseResource, uuids: Iterable[str]) -> Dict[str, Unit]:

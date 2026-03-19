@@ -4,7 +4,7 @@ from resources import db_resource, dodo_api_resource, rabbitmq_resource
 
 from functions.func_birthday.jobs import birthday_job
 from functions.func_birthday.schedulers import birthday_schedule
-from functions.func_couriers.jobs import couriers_job
+from functions.func_couriers.jobs import certificates_job, couriers_job, later_job, longers_job, sectors_job, waiting_job
 from functions.func_couriers.schedulers import couriers_schedule
 from functions.func_metrics.jobs import metrics_job
 from functions.func_metrics.schedulers import metrics_schedule
@@ -28,7 +28,12 @@ from functions.func_tickets.schedulers import tickets_schedule
 
 _jobs = [
     birthday_job,
+    certificates_job,
     couriers_job,
+    later_job,
+    longers_job,
+    sectors_job,
+    waiting_job,
     metrics_job,
     refusal_job,
     revenue_job,
