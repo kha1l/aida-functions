@@ -28,7 +28,7 @@
 
 - `birthday_job`
 - `couriers_job`
-- `metrics_job`
+- `metrics_job` — запускается каждый час и отправляет отчет только тем точкам, у которых локальное время равно `14:00`, `19:00` или `23:00`
 - `refusal_job`
 - `revenue_job`
 - `staff_job`
