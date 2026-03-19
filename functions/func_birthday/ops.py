@@ -1,8 +1,11 @@
+import asyncio
+
 from dagster import OpExecutionContext, op
 
+from .utils.op_birthday import run_birthday
 
-@op(required_resource_keys={"db", "rabbitmq"})
+
+@op(required_resource_keys={"db", "dodo_api", "openrouter", "rabbitmq"})
 def birthday_op(context: OpExecutionContext):
-    """TODO: реализовать операцию birthday."""
-    # Пример: context.resources.rabbitmq.publish(payload)
-    return None
+    """Запускает ежедневную отправку отчетов по дням рождения."""
+    asyncio.run(run_birthday(context))

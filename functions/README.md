@@ -17,8 +17,11 @@
 - `func_stationary`
 - `func_stock`
 - `func_stops`
-- `func_tariff`
 - `func_tickets`
+
+Сейчас все модульные `definitions.py` используют общий словарь ресурсов из
+`functions/shared/definition_resources.py`, чтобы их можно было запускать отдельно
+и они не расходились с корневым `defs.py`.
 
 Пример (только структура):
 ```

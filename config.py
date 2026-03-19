@@ -172,6 +172,38 @@ def dodo_api_settings() -> DodoApiSettings:
 
 
 # -------------------
+# OpenRouter
+# -------------------
+
+@dataclass(frozen=True)
+class OpenRouterSettings:
+    """Настройки доступа к OpenRouter."""
+
+    api_key: Optional[str]
+    base_url: str
+    model: str
+    timeout_seconds: int
+    retries: int
+    http_referer: Optional[str]
+    app_title: Optional[str]
+
+
+def openrouter_settings() -> OpenRouterSettings:
+    """Собирает настройки OpenRouter из env."""
+    return OpenRouterSettings(
+        api_key=_env("OPENROUTER_API_KEY"),
+        base_url=_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+        or "https://openrouter.ai/api/v1",
+        model=_env("OPENROUTER_MODEL", "arcee-ai/trinity-large-preview:free")
+        or "arcee-ai/trinity-large-preview:free",
+        timeout_seconds=_env_int("OPENROUTER_TIMEOUT_SECONDS", 60),
+        retries=_env_int("OPENROUTER_RETRIES", 3),
+        http_referer=_env("OPENROUTER_HTTP_REFERER"),
+        app_title=_env("OPENROUTER_APP_TITLE", "aida_functions"),
+    )
+
+
+# -------------------
 # Couriers
 # -------------------
 

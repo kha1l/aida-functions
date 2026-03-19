@@ -1,14 +1,15 @@
 # aida_functions
 
-`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API и публикует готовые payload в RabbitMQ.
+`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API, OpenRouter и публикует готовые payload в RabbitMQ.
 
 ## Что внутри
 
-- daily jobs по расписанию: курьеры, ресторан, метрики, стопы, тикеты и другие;
+- daily jobs по расписанию: курьеры, ресторан, отказы, дни рождения, юбилеи/стаж и другие;
 - manual jobs без расписания, которые запускаются из `aida3` по нажатию кнопок;
-- shared Dagster-ресурсы для БД, RabbitMQ и Dodo API;
+- shared Dagster-ресурсы для БД, RabbitMQ, Dodo API и OpenRouter;
 - bulk-запросы к БД в `database/requests.py`;
-- общая логика runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`.
+- общая логика runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`;
+- единый набор resource definitions для модульных `Definitions` в `functions/shared/definition_resources.py`.
 
 ## Основные директории
 
@@ -17,7 +18,7 @@
 | `defs.py` | Корневой `Definitions` со всеми jobs, schedules и ресурсами |
 | `config.py` | Настройки из env |
 | `database/` | SQLAlchemy-модели, engine и bulk-запросы |
-| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api` |
+| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api`, `openrouter` |
 | `messaging.py` | Формирование и публикация payload в RabbitMQ |
 | `functions/func_couriers/` | Отчеты по курьерам и delivery-manual jobs |
 | `functions/func_stationary/` | Отчеты по ресторану и stationary-manual jobs |
@@ -34,7 +35,6 @@
 - `stationary_job`
 - `stock_job`
 - `stops_job`
-- `tariff_job`
 - `tickets_job`
 
 ## Manual jobs
@@ -108,6 +108,16 @@ dagster job execute -m defs -j couriers_job
 
 Токены и `account.properties` читаются из БД.
 
+### OpenRouter
+
+- `OPENROUTER_API_KEY`
+- `OPENROUTER_BASE_URL`
+- `OPENROUTER_MODEL`
+- `OPENROUTER_TIMEOUT_SECONDS`
+- `OPENROUTER_RETRIES`
+- `OPENROUTER_HTTP_REFERER`
+- `OPENROUTER_APP_TITLE`
+
 ### Couriers и погода
 
 - `COURIERS_MAX_CONCURRENT_UNITS`
@@ -128,6 +138,41 @@ dagster job execute -m defs -j couriers_job
 ## Полезные детали
 
 - `resources/dodo_api.py` умеет retry на `429/500`, сетевые ошибки и shared `aiohttp` session.
+- `resources/openrouter.py` дает простой async-клиент для генерации поздравлений через OpenRouter.
 - `database/requests.py` строит bulk-выборки, чтобы job'ы меньше ходили в БД.
 - `functions/shared/manual_report_runtime.py` дает единый lifecycle для manual-отчетов.
+- `functions/shared/definition_resources.py` не дает модульным `definitions.py` разъехаться по набору ресурсов.
 - `aida3` запускает manual jobs через Dagster GraphQL и получает готовые сообщения из очереди.
+
+## Что уже автоматизировано
+
+- `birthday_job` — ежедневный отчет по дням рождения с короткими поздравлениями через OpenRouter
+- `staff_job` — ежедневный отчет по юбилеям и годовщинам работы с поздравлениями через OpenRouter
+- `refusal_job` — hourly-отчет по отмененным заказам за предыдущий завершенный локальный час точки
+
+## OpenRouter в job
+
+Для будущих job'ов с поздравлениями можно использовать ресурс `openrouter` прямо из op:
+
+```python
+from dagster import OpExecutionContext, op
+
+
+@op(required_resource_keys={"openrouter"})
+async def birthday_ai_op(context: OpExecutionContext):
+    result = await context.resources.openrouter.generate_greeting(
+        employee_name="Иван Иванов",
+        occasion="день рождения",
+        details=[
+            "работает в компании 5 лет",
+            "любит помогать новичкам",
+        ],
+    )
+
+    if not result.ok:
+        context.log.error(result.error_html or "OpenRouter request failed")
+        return
+
+    text = result.text or ""
+    context.log.info(text)
+```
