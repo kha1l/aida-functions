@@ -449,6 +449,7 @@ def _format_channels_message(
                 ]
             )
         sections.append("\n".join(lines).strip())
+        sections.append("#стопы #каналы")
 
     if resumed:
         lines = [f"🟢 <b>Возобновления продаж в {html.escape(unit_name)}</b>", ""]
@@ -464,7 +465,7 @@ def _format_channels_message(
                 ]
             )
         sections.append("\n".join(lines).strip())
-
+        sections.append("#стопы #каналы")
     return "\n\n".join(section for section in sections if section).strip() or None
 
 
@@ -494,6 +495,7 @@ def _format_ingredients_message(
                 ]
             )
         sections.append("\n".join(lines).strip())
+        sections.append("#стопы #игредиенты")
 
     if resumed:
         lines = [f"🟢 <b>Возобновления ингредиентов в {html.escape(unit_name)}</b>", ""]
@@ -506,7 +508,7 @@ def _format_ingredients_message(
                 ]
             )
         sections.append("\n".join(lines).strip())
-
+        sections.append("#стопы #игредиенты")
     return "\n\n".join(section for section in sections if section).strip() or None
 
 
@@ -536,6 +538,7 @@ def _format_key_ingredients_message(
                 "",
             ]
         )
+    lines.append("#стопы #игредиенты")
     return "\n".join(lines).strip() or None
 
 
@@ -558,12 +561,14 @@ def _format_sectors_message(
         for event in sorted(started, key=lambda item: (item.started_at or datetime.min, item.sector_name)):
             lines.extend(_sector_lines(event, is_resume=False))
         sections.append("\n".join(lines).strip())
+        sections.append("#стопы #сектора")
 
     if resumed:
         lines = [f"🟢 <b>Возобновления секторов в {html.escape(unit_name)}</b>", ""]
         for event in sorted(resumed, key=lambda item: (item.ended_at or datetime.min, item.sector_name)):
             lines.extend(_sector_lines(event, is_resume=True))
         sections.append("\n".join(lines).strip())
+        sections.append("#стопы #сектора")
 
     return "\n\n".join(section for section in sections if section).strip() or None
 

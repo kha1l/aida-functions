@@ -139,7 +139,7 @@ def _format_drink_rest_message(
             [
                 f"Название продукта: {entry.product_name}",
                 f"Среднее время на станции: {entry.station_avg_duration}",
-                f"Общее среднее время: {entry.total_avg_duration}",
+                # f"Общее среднее время: {entry.total_avg_duration}",
                 "",
             ]
         )

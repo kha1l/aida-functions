@@ -339,7 +339,7 @@ def _format_stationary_message(
         f"Долгие заказы: {long_orders_percent}%",
         f"Заказов через приложение: {sales_stats.mobile_orders_total} ({mobile_percent})",
         f"Заказов через киоск: {sales_stats.kiosk_orders_total} ({kiosk_percent})",
-        f"Заказов на подносе: {sales_stats.tray_orders_total} ({tray_percent})",
+        # f"Заказов на подносе: {sales_stats.tray_orders_total} ({tray_percent})",
         f"Продаж комбо: {_format_money(sales_stats.combo_revenue_total)} ({combo_revenue_percent}%)",
         (
             "Продаж доп. ингредиентов: "

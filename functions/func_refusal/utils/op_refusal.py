@@ -34,6 +34,7 @@ class CancelledOrder:
     sold_at: Optional[str]
     product_lines: List[str] = field(default_factory=list)
     total_price: Decimal = Decimal("0")
+    type_order: Optional[str] = None
 
 
 async def run_refusal(context: OpExecutionContext) -> None:
@@ -202,6 +203,14 @@ async def _fetch_cancelled_orders(
                 order.product_lines.append(product_name)
             order.total_price += _to_decimal(row.get("price"))
 
+            type_order = str(row.get("salesChannel") or "").strip()
+            if type_order:
+                if type_order == "Delivery":
+                    type_order = "Доставка"
+                else:
+                    type_order = "Ресторан"
+                order.type_order = type_order
+
         if len(rows) < PAGE_SIZE:
             break
         skip += PAGE_SIZE
@@ -228,7 +237,8 @@ def _format_refusal_message(
     ]
     for order in cancelled_orders:
         lines.append(f"Время заказа: {order.sold_at or '-'}")
-        lines.append(f"Номер заказа: {html.escape(order.order_id)}")
+        lines.append(f"Тип заказа: {html.escape(order.type_order or '-')}")
+        # lines.append(f"Номер заказа: {html.escape(order.order_id)}")
         lines.append("Продукты:")
         if order.product_lines:
             for product_name in order.product_lines:

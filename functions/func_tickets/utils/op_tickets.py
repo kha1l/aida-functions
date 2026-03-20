@@ -577,7 +577,7 @@ def _format_order_datetime(order_date: Optional[str], order_time: Optional[str])
 
 def _build_pyrus_task_url(task_id: int) -> str:
     """Строит прямую ссылку на карточку тикета в веб-интерфейсе Pyrus."""
-    return f"https://pyrus.com/t#{task_id}"
+    return f"https://pyrus.com/t#id{task_id}"
 
 
 def _parse_utc_datetime(value: Any) -> Optional[datetime]:

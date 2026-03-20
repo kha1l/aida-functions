@@ -334,6 +334,7 @@ async def _generate_staff_greeting(
         pick(language, "Текст должен быть доброжелательным и без мата.", "The text should be warm and without profanity."),
         pick(language, "Верни только текст поздравления без заголовка, подписи и пояснений.", "Return only the greeting text without a title, signature or explanations."),
         pick(language, "Без эмодзи и без переносов строк.", "No emojis and no line breaks."),
+        pick(language, "Поздравллять надо так, как будто праздник сегодня.", "You should congratulate as if it were a holiday today."),
     ]
     if unit_name:
         details.append(f"{pick(language, 'Заведение', 'Location')}: {unit_name}.")

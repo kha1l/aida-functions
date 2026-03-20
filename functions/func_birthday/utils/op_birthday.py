@@ -251,8 +251,8 @@ async def _generate_birthday_greeting(
 ) -> str:
     """Генерирует короткое поздравление через OpenRouter и безопасно откатывается на шаблон."""
     details = [
-        f"{pick(language, 'Должность', 'Role')}: {employee.position_name or pick(language, 'сотрудник', 'employee')}.",
-        pick(language, "Нужно ровно 1 короткое предложение.", "Need exactly 1 short sentence."),
+        # {pick(language, 'Должность', 'Role')}: {employee.position_name or pick(language, 'сотрудник', 'employee')}.",
+        f"{pick(language, "Нужно ровно 1 короткое предложение.", "Need exactly 1 short sentence.")}",
         pick(language, "Текст должен быть доброжелательным и без мата.", "The text should be warm and without profanity."),
         pick(language, "Верни только текст поздравления без заголовка, подписи и пояснений.", "Return only the greeting text without a title, signature or explanations."),
         pick(language, "Без эмодзи и без переносов строк.", "No emojis and no line breaks."),

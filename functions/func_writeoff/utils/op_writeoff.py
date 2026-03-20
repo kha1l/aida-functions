@@ -317,10 +317,10 @@ def _format_writeoff_message(
         lines.append("По причинам списания:")
         lines.append("Списаний за день не найдено.")
 
-    lines.append("")
-    lines.append("Списания кусочков:")
-    for reason, label in SLICE_REASON_LABELS.items():
-        lines.append(f"{label}: {int(slice_totals[reason])}")
+    # lines.append("")
+    # lines.append("Списания кусочков:")
+    # for reason, label in SLICE_REASON_LABELS.items():
+    #     lines.append(f"{label}: {int(slice_totals[reason])}")
 
     lines.append("")
     if most_expensive is not None:

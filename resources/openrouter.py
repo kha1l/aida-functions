@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import json
 from dataclasses import dataclass
@@ -396,6 +397,12 @@ def _extract_request_id(headers: Dict[str, str]) -> Optional[str]:
         if value:
             return value
     return None
+
+
+@contextlib.asynccontextmanager
+async def _null_async_context():
+    """Пустой async-контекст, когда внешний semaphore не передан."""
+    yield
 
 
 def _truncate(text: str, limit: int = 2000) -> str:
