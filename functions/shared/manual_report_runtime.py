@@ -12,7 +12,8 @@ from typing import Awaitable, Callable, Optional
 import aiohttp
 from dagster import OpExecutionContext
 
-from database.requests import load_accounts_and_tokens_bulk, load_units_by_uuids
+from database.requests import load_accounts_and_tokens_bulk, load_chat_languages, load_units_by_uuids
+from functions.shared.report_text_i18n import translate_report_text
 from messaging import build_payload
 
 
@@ -31,6 +32,7 @@ class ManualUnitReportRequest:
     account_properties: Optional[str]
     chat_id: int
     topic_id: Optional[int]
+    language: str
     message_date: Optional[str]
     op_config: dict[str, object]
 
@@ -72,6 +74,7 @@ async def run_manual_unit_report(
     account_auth_map = await load_accounts_and_tokens_bulk(db, {account_id})
     dodo_api.prime_account_token_cache(account_auth_map)
     account, _ = account_auth_map.get(account_id, (None, None))
+    chat_languages = await load_chat_languages(db, [chat_id])
 
     request = ManualUnitReportRequest(
         unit_uuid=unit_uuid,
@@ -81,6 +84,7 @@ async def run_manual_unit_report(
         account_properties=account.properties if account else None,
         chat_id=chat_id,
         topic_id=topic_id,
+        language=chat_languages.get(chat_id, "ru"),
         message_date=message_date,
         op_config=dict(op_config),
     )
@@ -114,6 +118,8 @@ async def run_manual_unit_report(
                     error_status=last_error_status,
                 )
                 return
+
+            report_text = translate_report_text(post, request.language, report_text)
 
             # Режем только перед отправкой в RabbitMQ, чтобы builder возвращал единый текст отчета.
             for text_chunk in split_text_for_telegram(

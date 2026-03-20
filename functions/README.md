@@ -17,13 +17,18 @@
 - `func_staff`
 - `func_stationary`
 - `func_stock`
-- `func_stops`
-- `func_tickets`
+- `func_stops` — регулярный job по стопам продаж, ингредиентов, ключевых ингредиентов и секторов
+- `func_tickets` — регулярный job по клиентским тикетам из Pyrus
+- `func_tracking` — manual job по агрегированным данным трекинга производства
 - `func_writeoff`
 
 Сейчас все модульные `definitions.py` используют общий словарь ресурсов из
 `functions/shared/definition_resources.py`, чтобы их можно было запускать отдельно
 и они не расходились с корневым `defs.py`.
+
+Тексты отчетов локализуются в `functions/shared/report_text_i18n.py`: базовый язык
+формирования — русский, а при отправке в RabbitMQ отчет автоматически адаптируется
+под язык чата (`ru` / `en`) из `special.settings.country`.
 
 Пример (только структура):
 ```

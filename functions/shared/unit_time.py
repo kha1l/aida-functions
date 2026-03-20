@@ -27,11 +27,31 @@ def floor_unit_to_hour(unit: Optional[Unit]) -> datetime:
     return resolve_unit_now(unit).replace(minute=0, second=0, microsecond=0)
 
 
+def floor_unit_to_minutes(unit: Optional[Unit], *, minutes: int) -> datetime:
+    """Округляет локальное время точки вниз до ближайшего кратного интервала."""
+    if minutes <= 0:
+        raise ValueError("minutes must be positive")
+    now = resolve_unit_now(unit).replace(second=0, microsecond=0)
+    floored_minute = (now.minute // minutes) * minutes
+    return now.replace(minute=floored_minute)
+
+
 
 def build_previous_local_hour_window(unit: Optional[Unit]) -> tuple[datetime, datetime]:
     """Возвращает окно предыдущего завершенного локального часа точки."""
     dt_end = floor_unit_to_hour(unit)
     dt_start = dt_end - timedelta(hours=1)
+    return dt_start, dt_end
+
+
+def build_previous_local_minute_window(
+    unit: Optional[Unit],
+    *,
+    minutes: int,
+) -> tuple[datetime, datetime]:
+    """Возвращает предыдущее завершенное окно фиксированной длины в локальном времени точки."""
+    dt_end = floor_unit_to_minutes(unit, minutes=minutes)
+    dt_start = dt_end - timedelta(minutes=minutes)
     return dt_start, dt_end
 
 

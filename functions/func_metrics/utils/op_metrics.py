@@ -1,4 +1,4 @@
-"""Почасовой job по ключевым метрикам с локальными триггерами 14/19/23 для каждой точки."""
+"""Почасовой job по ключевым метрикам с локальными часами из env."""
 
 from __future__ import annotations
 
@@ -10,7 +10,14 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from dagster import OpExecutionContext
 
+from config import schedule_local_hours
 from database.requests import select_report_subscriptions
+from database.requests import (
+    load_accounts_and_tokens_bulk,
+    load_chat_languages,
+    load_units_by_uuids,
+    select_account_ids_for_units,
+)
 from functions.shared.manual_report_runtime import to_int
 from functions.shared.report_job_runtime import (
     load_report_job_snapshot,
@@ -19,10 +26,12 @@ from functions.shared.report_job_runtime import (
     publish_report_to_subscribers,
     report_job_runtime,
 )
+from functions.shared.report_text_i18n import translate_report_text
 from functions.shared.unit_time import floor_unit_to_hour, resolve_unit_now
 from functions.func_couriers.utils.manual_report_common import parse_dodo_datetime
+from messaging import build_payload
 
-TRIGGER_HOURS = {14, 19, 23}
+TRIGGER_HOURS = set(schedule_local_hours("metrics", (14, 19, 23)))
 MAX_CONCURRENT_UNITS = 15
 PAGE_SIZE = 500
 COMPARE_PERIOD_DAYS = 7
@@ -175,6 +184,99 @@ async def run_metrics(context: OpExecutionContext) -> None:
                 )
 
         await asyncio.gather(*(process_unit(unit_uuid) for unit_uuid in unit_uuids))
+
+
+async def run_metrics_manual(context: OpExecutionContext) -> None:
+    """Собирает оперативный отчет по метрикам для выбранных пользователем заведений."""
+    db = context.resources.db
+    rabbitmq = context.resources.rabbitmq
+    dodo_api = context.resources.dodo_api
+
+    unit_uuids = _normalize_unit_uuids(context.op_config.get("unit_uuids"))
+    if not unit_uuids:
+        context.log.warning("metrics_manual_op: не переданы unit_uuids")
+        return
+
+    units = await load_units_by_uuids(db, unit_uuids)
+    candidate_accounts_by_unit = await select_account_ids_for_units(db, unit_uuids)
+    all_account_ids = {
+        account_id
+        for account_ids in candidate_accounts_by_unit.values()
+        for account_id in account_ids
+    }
+    account_auth_map = await load_accounts_and_tokens_bulk(db, all_account_ids)
+    dodo_api.prime_account_token_cache(account_auth_map)
+
+    chat_id = int(context.op_config["chat_id"])
+    topic_id = context.op_config.get("topic_id")
+    chat_languages = await load_chat_languages(db, [chat_id])
+    report_language = chat_languages.get(chat_id, "ru")
+
+    async with report_job_runtime(dodo_api, rabbitmq):
+        sorted_unit_uuids = sorted(
+            unit_uuids,
+            key=lambda unit_uuid: (
+                units.get(unit_uuid).name.lower()
+                if units.get(unit_uuid) and units.get(unit_uuid).name
+                else unit_uuid
+            ),
+        )
+
+        for unit_uuid in sorted_unit_uuids:
+            unit = units.get(unit_uuid)
+            unit_name = unit.name if unit and unit.name else unit_uuid
+            period_end = floor_unit_to_hour(unit)
+            candidate_accounts = candidate_accounts_by_unit.get(unit_uuid, [])
+            if not candidate_accounts:
+                context.log.warning("metrics_manual_op: нет токенов для unit %s", unit_uuid)
+                continue
+
+            report_text: Optional[str] = None
+            last_error_html: Optional[str] = None
+            last_error_status: Optional[int] = None
+
+            for account_id in candidate_accounts:
+                account, _token = account_auth_map.get(account_id, (None, None))
+                report_text, last_error_html, last_error_status = await _build_metrics_report(
+                    dodo_api=dodo_api,
+                    unit_uuid=unit_uuid,
+                    unit_name=unit_name,
+                    account_id=account_id,
+                    period_end=period_end,
+                    market_code=_extract_market_code(
+                        account.properties if account else None
+                    ),
+                )
+                if last_error_html is None and last_error_status == 200:
+                    break
+                log_auth_error(
+                    context,
+                    log_prefix="metrics_manual_op",
+                    unit_uuid=unit_uuid,
+                    account_id=account_id,
+                    error_html=last_error_html,
+                    error_status=last_error_status,
+                )
+
+            if not report_text:
+                log_final_unit_error(
+                    context,
+                    log_prefix="metrics_manual_op",
+                    unit_uuid=unit_uuid,
+                    error_html=last_error_html,
+                    error_status=last_error_status,
+                    empty_message="нет данных",
+                )
+                continue
+
+            payload = build_payload(
+                chat_id=chat_id,
+                topic_id=topic_id,
+                post="metrics",
+                text=translate_report_text("metrics", report_language, report_text),
+                unit_uuid=unit_uuid,
+            )
+            await rabbitmq.publish_async(payload)
 
 
 async def _build_metrics_report(
@@ -762,3 +864,21 @@ def _extract_market_code(properties: Optional[str]) -> Optional[str]:
     if not parts:
         return None
     return parts[-1].lower()
+
+
+def _normalize_unit_uuids(value: object) -> List[str]:
+    """Убирает пустые значения и дубли из списка заведений."""
+    if not isinstance(value, list):
+        return []
+
+    result: List[str] = []
+    seen: Set[str] = set()
+    for item in value:
+        if not isinstance(item, str):
+            continue
+        cleaned = item.strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result

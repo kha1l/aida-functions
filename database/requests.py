@@ -10,7 +10,8 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Optional, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
-from database.models import Account, Token, Orders, Unit, Subscribe
+from database.models import Account, Token, Orders, Unit, Subscribe, Franchisee, Settings
+from functions.shared.i18n import normalize_language
 
 if TYPE_CHECKING:
     from resources.database import DatabaseResource
@@ -129,7 +130,9 @@ class ReportSubscription:
     account_id: Optional[int]
     chat_id: int
     topic_id: Optional[int]
+    language: str = "ru"
     params: Optional[str] = None
+    post: Optional[str] = None
 
 
 CouriersSubscription = ReportSubscription
@@ -147,6 +150,10 @@ async def select_report_subscriptions(
         async with sessionmaker() as session:
             orders_stmt = select(Orders).where(Orders.post == post)
             orders = (await session.execute(orders_stmt)).scalars().all()
+            languages_by_chat = await _load_chat_languages_in_session(
+                session,
+                {order.chat_id for order in orders},
+            )
             for order in orders:
                 if not order.uuids:
                     continue
@@ -159,7 +166,9 @@ async def select_report_subscriptions(
                             account_id=order.account_id,
                             chat_id=order.chat_id,
                             topic_id=order.topic_id,
+                            language=languages_by_chat.get(order.chat_id, "ru"),
                             params=order.params,
+                            post=post,
                         )
                     )
         return subscriptions
@@ -174,6 +183,96 @@ async def select_report_subscriptions(
 async def select_couriers_subscriptions(db: DatabaseResource) -> List[ReportSubscription]:
     """Возвращает список подписок couriers с разворотом uuids."""
     return await select_report_subscriptions(db, "couriers")
+
+
+async def select_report_subscriptions_many(
+    db: DatabaseResource,
+    posts: Iterable[str],
+) -> List[ReportSubscription]:
+    """Возвращает список подписок по нескольким post за один запрос."""
+    post_list = [post for post in posts if post]
+    if not post_list:
+        return []
+
+    async def _action() -> List[ReportSubscription]:
+        """Разворачивает записи orders в список подписок по наборам post и uuids."""
+        sessionmaker = db.get_sessionmaker()
+        subscriptions: List[ReportSubscription] = []
+        async with sessionmaker() as session:
+            orders_stmt = select(Orders).where(Orders.post.in_(post_list))
+            orders = (await session.execute(orders_stmt)).scalars().all()
+            languages_by_chat = await _load_chat_languages_in_session(
+                session,
+                {order.chat_id for order in orders},
+            )
+            for order in orders:
+                if not order.uuids:
+                    continue
+                for unit_uuid in order.uuids:
+                    if not unit_uuid:
+                        continue
+                    subscriptions.append(
+                        ReportSubscription(
+                            unit_uuid=unit_uuid,
+                            account_id=order.account_id,
+                            chat_id=order.chat_id,
+                            topic_id=order.topic_id,
+                            language=languages_by_chat.get(order.chat_id, "ru"),
+                            params=order.params,
+                            post=order.post,
+                        )
+                    )
+        return subscriptions
+
+    return await _run_with_retry(
+        operation_name="select_report_subscriptions_many",
+        context=f"posts={','.join(post_list)}",
+        action=_action,
+    )
+
+
+async def _load_chat_languages_in_session(
+    session,
+    chat_ids: Iterable[int],
+) -> Dict[int, str]:
+    """Читает языки чатов внутри уже открытой DB-сессии."""
+    chat_id_list = [chat_id for chat_id in chat_ids if chat_id]
+    if not chat_id_list:
+        return {}
+
+    stmt = (
+        select(Settings.chat_id, Settings.country)
+        .where(Settings.chat_id.in_(chat_id_list))
+        .order_by(Settings.id.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+
+    result: Dict[int, str] = {}
+    for chat_id, language in rows:
+        if chat_id not in result:
+            result[int(chat_id)] = normalize_language(language)
+    return result
+
+
+async def load_chat_languages(
+    db: DatabaseResource,
+    chat_ids: Iterable[int],
+) -> Dict[int, str]:
+    """Возвращает языки интерфейса по chat_id."""
+    chat_id_list = [chat_id for chat_id in chat_ids if chat_id]
+    if not chat_id_list:
+        return {}
+
+    async def _action() -> Dict[int, str]:
+        sessionmaker = db.get_sessionmaker()
+        async with sessionmaker() as session:
+            return await _load_chat_languages_in_session(session, chat_id_list)
+
+    return await _run_with_retry(
+        operation_name="load_chat_languages",
+        context=f"chat_ids={len(chat_id_list)}",
+        action=_action,
+    )
 
 
 async def load_units_by_uuids(db: DatabaseResource, uuids: Iterable[str]) -> Dict[str, Unit]:
@@ -192,6 +291,30 @@ async def load_units_by_uuids(db: DatabaseResource, uuids: Iterable[str]) -> Dic
 
     return await _run_with_retry(
         operation_name="load_units_by_uuids",
+        context=f"uuids={len(uuid_list)}",
+        action=_action,
+    )
+
+
+async def load_franchisee_group_uuids_by_unit(
+    db: DatabaseResource,
+    uuids: Iterable[str],
+) -> Dict[str, str]:
+    """Возвращает group_uuid франчайзи по unit uuid для сетевой агрегации отчетов."""
+    uuid_list = [uuid for uuid in uuids if uuid]
+    if not uuid_list:
+        return {}
+
+    async def _action() -> Dict[str, str]:
+        """Читает group_uuid для набора точек одним bulk-запросом."""
+        sessionmaker = db.get_sessionmaker()
+        async with sessionmaker() as session:
+            rows_stmt = select(Franchisee.uuid, Franchisee.group_uuid).where(Franchisee.uuid.in_(uuid_list))
+            rows = (await session.execute(rows_stmt)).all()
+            return {uuid: group_uuid for uuid, group_uuid in rows if uuid and group_uuid}
+
+    return await _run_with_retry(
+        operation_name="load_franchisee_group_uuids_by_unit",
         context=f"uuids={len(uuid_list)}",
         action=_action,
     )

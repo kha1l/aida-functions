@@ -56,6 +56,7 @@ class OpenRouterClient:
         *,
         employee_name: str,
         occasion: str,
+        language: str = "ru",
         age: Optional[int] = None,
         details: Optional[Iterable[str]] = None,
         tone: str = "теплый, уважительный и живой",
@@ -71,15 +72,22 @@ class OpenRouterClient:
             )
 
         detail_lines = [item.strip() for item in (details or []) if item and item.strip()]
-        prompt_lines = [
-            f"Напиши поздравление для сотрудника {employee_name}.",
-            f"Повод: {occasion}.",
-        ]
+        english = str(language).lower().startswith("en")
+        if english:
+            prompt_lines = [
+                f"Write a greeting for employee {employee_name}.",
+                f"Occasion: {occasion}.",
+            ]
+        else:
+            prompt_lines = [
+                f"Напиши поздравление для сотрудника {employee_name}.",
+                f"Повод: {occasion}.",
+            ]
         if age is not None:
-            prompt_lines.append(f"Возраст: {age}.")
-        prompt_lines.append(f"Тон: {tone}.")
+            prompt_lines.append(f"{'Age' if english else 'Возраст'}: {age}.")
+        prompt_lines.append(f"{'Tone' if english else 'Тон'}: {tone}.")
         if detail_lines:
-            prompt_lines.append("Дополнительные детали:")
+            prompt_lines.append("Additional details:" if english else "Дополнительные детали:")
             prompt_lines.extend(f"- {item}" for item in detail_lines)
 
         payload = {
@@ -88,6 +96,11 @@ class OpenRouterClient:
                 {
                     "role": "system",
                     "content": (
+                        "You help an HR team write short, warm and personal employee greetings in English. "
+                        "Avoid cliches, bureaucratic phrasing and overly pompous tone. "
+                        "Return a message that is ready to send to the employee."
+                        if english
+                        else
                         "Ты помогаешь HR-команде писать короткие, доброжелательные и "
                         "персональные поздравления сотрудникам на русском языке. "
                         "Избегай канцелярита, штампов и слишком пафосного тона. "
@@ -109,6 +122,7 @@ class OpenRouterClient:
         *,
         employee_name: str,
         occasion: str,
+        language: str = "ru",
         age: Optional[int] = None,
         details: Optional[Iterable[str]] = None,
         tone: str = "теплый, уважительный и живой",
@@ -118,6 +132,7 @@ class OpenRouterClient:
         return await self.generate_greeting(
             employee_name=employee_name,
             occasion=occasion,
+            language=language,
             age=age,
             details=details,
             tone=tone,

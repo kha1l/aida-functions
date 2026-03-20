@@ -8,6 +8,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from dagster import OpExecutionContext
 
+from functions.shared.i18n import pick
+
 from .manual_report_common import (
     ManualCourierReportRequest,
     build_report_window,
@@ -95,6 +97,7 @@ async def _build_later_report(
         account_id=request.account_id,
         unit_name=request.unit_name,
         date_label=date_label,
+        language=request.language,
         schedules=schedule_entries,
         shifts=shift_entries,
         staff_cache=staff_cache,
@@ -193,11 +196,12 @@ async def _format_later_message(
     account_id: int,
     unit_name: str,
     date_label: str,
+    language: str,
     schedules: Dict[str, List[ScheduledShift]],
     shifts: Iterable[ActualShift],
     staff_cache: Dict[str, StaffProfile],
 ) -> str:
-    lines = [f"\U0000203C Опоздания/невыходы за {date_label} в заведении <b>{unit_name}</b>", ""]
+    lines = [f"\U0000203C {pick(language, 'Опоздания/невыходы за', 'Late arrivals / absences for')} {date_label} {pick(language, 'в заведении', 'at')} <b>{unit_name}</b>", ""]
     late_lines: List[str] = []
     early_leave_lines: List[str] = []
     wrong_shift_lines: List[str] = []
@@ -221,28 +225,19 @@ async def _format_later_message(
         )
 
         if matched_schedule is None:
-            verb = _verb_for_sex(staff.sex, male="вышел", female="вышла", neutral="вышел(а)")
-            wrong_shift_lines.append(
-                f"{staff.full_name} {verb} на работу не в свою смену"
-            )
+            wrong_shift_lines.append(_format_wrong_shift_line(staff.full_name, language))
             continue
 
         late_minutes = int((shift.clock_in_at - matched_schedule.start_at).total_seconds() // 60)
         if late_minutes > LATE_THRESHOLD_MINUTES:
-            verb = _verb_for_sex(staff.sex, male="опоздал", female="опоздала", neutral="опоздал(а)")
-            late_lines.append(
-                f"{staff.full_name} {verb} на {_format_minutes(late_minutes)}"
-            )
+            late_lines.append(_format_late_line(staff, late_minutes, language))
 
         if shift.clock_out_at is not None:
             early_leave_minutes = int(
                 (matched_schedule.end_at - shift.clock_out_at).total_seconds() // 60
             )
             if early_leave_minutes > LATE_THRESHOLD_MINUTES:
-                verb = _verb_for_sex(staff.sex, male="ушел", female="ушла", neutral="ушел(ушла)")
-                early_leave_lines.append(
-                    f"{staff.full_name} {verb} раньше на {_format_minutes(early_leave_minutes)}"
-                )
+                early_leave_lines.append(_format_early_leave_line(staff, early_leave_minutes, language))
 
     for staff_id, unmatched_schedules in remaining_schedules.items():
         if not unmatched_schedules:
@@ -253,18 +248,17 @@ async def _format_later_message(
             staff_cache=staff_cache,
             staff_id=staff_id,
         )
-        verb = _verb_for_sex(staff.sex, male="вышел", female="вышла", neutral="вышел(а)")
-        absent_lines.append(f"{staff.full_name} не {verb} на работу")
+        absent_lines.append(_format_absent_line(staff.full_name, language))
 
     sections = [
-        ("\U000023F0 Опоздания", late_lines),
-        ("\U000023F3 Ушли раньше", early_leave_lines),
-        ("\U00002753 Не своя смена", wrong_shift_lines),
-        ("\U0001F6A8 Не вышли", absent_lines),
+        (pick(language, "\U000023F0 Опоздания", "\U000023F0 Late arrivals"), late_lines),
+        (pick(language, "\U000023F3 Ушли раньше", "\U000023F3 Left early"), early_leave_lines),
+        (pick(language, "\U00002753 Не своя смена", "\U00002753 Wrong shift"), wrong_shift_lines),
+        (pick(language, "\U0001F6A8 Не вышли", "\U0001F6A8 Absences"), absent_lines),
     ]
 
     if not any(items for _, items in sections):
-        lines.append("Нарушений не найдено.")
+        lines.append(pick(language, "Нарушений не найдено.", "No violations found."))
     else:
         for title, items in sections:
             if not items:
@@ -289,7 +283,7 @@ async def _get_staff_profile(
 
     member_result = await dodo_api.get(account_id, f"staff/members/{staff_id}")
     if not member_result.ok or not isinstance(member_result.data, dict):
-        profile = StaffProfile(full_name=f"Сотрудник {staff_id}", sex=None)
+        profile = StaffProfile(full_name=f"Employee {staff_id}", sex=None)
         staff_cache[staff_id] = profile
         return profile
 
@@ -336,7 +330,43 @@ def _verb_for_sex(sex: Optional[str], *, male: str, female: str, neutral: str) -
     return neutral
 
 
-def _format_minutes(minutes: int) -> str:
+def _format_late_line(staff: StaffProfile, late_minutes: int, language: str) -> str:
+    if language == "en":
+        return f"{staff.full_name} was late by {_format_minutes(late_minutes, language)}"
+    verb = _verb_for_sex(staff.sex, male="опоздал", female="опоздала", neutral="опоздал(а)")
+    return f"{staff.full_name} {verb} на {_format_minutes(late_minutes, language)}"
+
+
+def _format_early_leave_line(staff: StaffProfile, early_leave_minutes: int, language: str) -> str:
+    if language == "en":
+        return f"{staff.full_name} left early by {_format_minutes(early_leave_minutes, language)}"
+    verb = _verb_for_sex(staff.sex, male="ушел", female="ушла", neutral="ушел(ушла)")
+    return f"{staff.full_name} {verb} раньше на {_format_minutes(early_leave_minutes, language)}"
+
+
+def _format_wrong_shift_line(full_name: str, language: str) -> str:
+    return (
+        f"{full_name} came to work outside the scheduled shift"
+        if language == "en"
+        else f"{full_name} вышел на работу не в свою смену"
+    )
+
+
+def _format_absent_line(full_name: str, language: str) -> str:
+    return (
+        f"{full_name} did not show up for the shift"
+        if language == "en"
+        else f"{full_name} не вышел на работу"
+    )
+
+
+def _format_minutes(minutes: int, language: str) -> str:
+    if language == "en":
+        if minutes >= 60:
+            hours = minutes // 60
+            rest_minutes = minutes % 60
+            return f"{hours}h {rest_minutes}m"
+        return f"{minutes}m"
     if minutes >= 60:
         hours = minutes // 60
         rest_minutes = minutes % 60

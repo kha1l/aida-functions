@@ -8,6 +8,7 @@
 - manual jobs без расписания, которые запускаются из `aida3` по нажатию кнопок;
 - shared Dagster-ресурсы для БД, RabbitMQ, Dodo API и OpenRouter;
 - bulk-запросы к БД в `database/requests.py`, чтобы job'ы меньше дергали PostgreSQL;
+- локализация текстов отчетов по языку чата из `special.settings.country` (`ru` / `en`);
 - общий runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`;
 - единый набор ресурсов для модульных `Definitions` в `functions/shared/definition_resources.py`.
 
@@ -18,11 +19,12 @@
 | `defs.py` | Корневой `Definitions` со всеми jobs, schedules и ресурсами |
 | `config.py` | Настройки из env |
 | `database/` | SQLAlchemy-модели, engine и bulk-запросы |
-| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api`, `openrouter` |
+| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api`, `openrouter`, `pyrus` |
 | `messaging.py` | Формирование и публикация payload в RabbitMQ |
 | `functions/func_couriers/` | Daily-отчет по курьерам и delivery-manual jobs |
 | `functions/func_stationary/` | Daily-отчет по ресторану и stationary-manual jobs |
 | `functions/func_defect/` | Hourly-отчет по браку |
+| `functions/func_tracking/` | Manual-отчет по агрегированным метрикам трекинга |
 | `functions/func_writeoff/` | Daily-отчет по списаниям |
 | `functions/shared/` | Общий runtime и shared helpers для job'ов |
 
@@ -37,8 +39,8 @@
 - `staff_job` — ежедневный отчет по юбилеям и годовщинам работы с поздравлениями через OpenRouter
 - `stationary_job`
 - `stock_job` — запускается каждый час и отправляет отчет только точкам, у которых локальное время равно `08:00` или `15:00`
-- `stops_job`
-- `tickets_job`
+- `stops_job` — каждые 5 минут собирает четыре типа stop-отчетов (`stops_rest`, `stops_ings`, `stops_key_ings`, `stops_sector`) за предыдущее завершенное локальное 5-минутное окно точки
+- `tickets_job` — каждые 5 минут читает Pyrus и отправляет тикеты клиентов за предыдущее завершенное 5-минутное окно
 - `writeoff_job` — daily-отчет по списаниям за предыдущий полный локальный день точки
 
 ## Manual jobs
@@ -56,6 +58,13 @@
 - `later_rest_job`
 - `assembly_rest_job`
 - `drink_rest_job`
+
+### Operation / manual
+
+- `metrics_manual_job`
+- `revenue_manual_job`
+- `stock_manual_job`
+- `tracking_job`
 
 ## Как это работает
 
@@ -107,6 +116,18 @@ dagster job execute -m defs -j couriers_job
 
 Токены и `account.properties` читаются из БД.
 
+### Pyrus
+
+- `PYRUS_TOKEN`
+- `PYRUS_KEY`
+- `PYRUS_BASE_URL`
+- `PYRUS_TIMEOUT_SECONDS`
+- `PYRUS_RETRIES`
+- `PYRUS_VERIFY_SSL`
+- `PYRUS_MAX_CONCURRENT_REQUESTS`
+- `PYRUS_TICKETS_CATALOG_ID`
+- `PYRUS_TICKETS_FORM_ID`
+
 ### OpenRouter
 
 - `OPENROUTER_API_KEY`
@@ -133,12 +154,29 @@ dagster job execute -m defs -j couriers_job
 - `SCHEDULE_<NAME>_TZ`
 - `SCHEDULE_<NAME>_ENABLED`
 - `SCHEDULE_TZ_DEFAULT`
+- `SCHEDULE_<NAME>_HOURS` — для job, которые запускаются часто, но отправляют отчет только в заданные локальные часы точки (`metrics`, `revenue`, `stock`)
+
+Пример:
+
+```env
+SCHEDULE_TZ_DEFAULT=UTC
+SCHEDULE_BIRTHDAY_CRON=0 9 * * *
+SCHEDULE_BIRTHDAY_TZ=UTC
+SCHEDULE_BIRTHDAY_ENABLED=true
+
+SCHEDULE_METRICS_CRON=0 * * * *
+SCHEDULE_METRICS_TZ=UTC
+SCHEDULE_METRICS_ENABLED=true
+SCHEDULE_METRICS_HOURS=14,19,23
+```
 
 ## Полезные детали
 
 - `resources/dodo_api.py` умеет retry на `429/500`, сетевые ошибки и shared `aiohttp` session.
 - `resources/openrouter.py` дает простой async-клиент для генерации поздравлений через OpenRouter.
+- `resources/pyrus.py` инкапсулирует авторизацию и чтение тикетов из Pyrus.
 - `database/requests.py` строит bulk-выборки, чтобы job'ы меньше ходили в БД.
 - `functions/shared/manual_report_runtime.py` дает единый lifecycle для manual-отчетов.
+- `functions/shared/report_text_i18n.py` переводит готовые тексты отчетов на язык чата без дублирования бизнес-логики.
 - `functions/shared/definition_resources.py` не дает модульным `definitions.py` разъехаться по набору ресурсов.
 - `aida3` запускает manual jobs через Dagster GraphQL и получает готовые сообщения из очереди.

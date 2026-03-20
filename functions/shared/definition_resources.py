@@ -1,6 +1,6 @@
 """Общие resource_defs для модульных Definitions и корневого defs.py."""
 
-from resources import db_resource, dodo_api_resource, openrouter_resource, rabbitmq_resource
+from resources import db_resource, dodo_api_resource, openrouter_resource, rabbitmq_resource, pyrus_resource
 
 
 # Один словарь на весь проект: так модульные definitions и корневой defs.py
@@ -10,4 +10,5 @@ COMMON_RESOURCE_DEFS = {
     "dodo_api": dodo_api_resource,
     "openrouter": openrouter_resource,
     "rabbitmq": rabbitmq_resource,
+    "pyrus": pyrus_resource,
 }

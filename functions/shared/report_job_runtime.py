@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Mapping, Optional, Tuple
 
 import aiohttp
 from dagster import OpExecutionContext
@@ -18,12 +18,15 @@ from database.requests import (
     select_account_ids_for_units,
 )
 from functions.shared.manual_report_runtime import html_to_log_text, split_text_for_telegram
+from functions.shared.i18n import normalize_language
+from functions.shared.report_text_i18n import translate_report_text
 from functions.shared.unit_time import resolve_unit_now
 from messaging import build_payload
 
 
 LoadSubscriptions = Callable[[object], Awaitable[List[ReportSubscription]]]
 AccountAuthMap = Dict[int, Tuple[Optional[Account], Optional[Token]]]
+LocalizedText = str | Mapping[str, str] | Callable[[str], str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,15 +89,11 @@ async def load_report_job_snapshot(
         ),
     )
 
-    all_account_ids = {
-        account_id
-        for account_ids in accounts_by_unit.values()
-        for account_id in account_ids
-    }
-    all_account_ids.update(
-        account_id
-        for account_ids in candidate_accounts_by_unit.values()
-        for account_id in account_ids
+    # Собираем единый набор account_id заранее, чтобы один раз прогреть кеш токенов
+    # и потом не ходить в БД по каждому заведению отдельно.
+    all_account_ids = _collect_snapshot_account_ids(
+        accounts_by_unit,
+        candidate_accounts_by_unit,
     )
     account_auth_map = await load_accounts_and_tokens_bulk(db, all_account_ids)
 
@@ -157,16 +156,25 @@ async def publish_report_to_subscribers(
     publish_lock: asyncio.Lock,
     subscribers: List[ReportSubscription],
     post: str,
-    text: str,
+    text: LocalizedText,
     unit_uuid: str,
     prefer_paragraph_split: bool = False,
 ) -> None:
     """Режет длинный отчет и отправляет его всем подписчикам точки."""
-    for text_chunk in split_text_for_telegram(
-        text,
-        prefer_paragraph_split=prefer_paragraph_split,
-    ):
-        for sub in subscribers:
+    localized_text_cache: Dict[str, str] = {}
+
+    for sub in subscribers:
+        language = normalize_language(sub.language)
+        report_text = _resolve_localized_text(
+            text,
+            post=post,
+            language=language,
+            cache=localized_text_cache,
+        )
+        for text_chunk in split_text_for_telegram(
+            report_text,
+            prefer_paragraph_split=prefer_paragraph_split,
+        ):
             payload = build_payload(
                 chat_id=sub.chat_id,
                 topic_id=sub.topic_id,
@@ -230,3 +238,41 @@ def log_final_unit_error(
 def resolve_target_local_hour(snapshot: ReportJobSnapshot, unit_uuid: str) -> int:
     """Возвращает локальный час точки по данным snapshot."""
     return resolve_unit_now(snapshot.unit_for(unit_uuid)).hour
+
+
+def _collect_snapshot_account_ids(
+    accounts_by_unit: Dict[str, List[int]],
+    candidate_accounts_by_unit: Dict[str, List[int]],
+) -> set[int]:
+    """Собирает все account_id, которые могут понадобиться job во время прогона."""
+    result = {
+        account_id
+        for account_ids in accounts_by_unit.values()
+        for account_id in account_ids
+    }
+    result.update(
+        account_id
+        for account_ids in candidate_accounts_by_unit.values()
+        for account_id in account_ids
+    )
+    return result
+
+
+def _resolve_localized_text(
+    source: LocalizedText,
+    *,
+    post: str,
+    language: str,
+    cache: Dict[str, str],
+) -> str:
+    """Возвращает текст отчета для конкретного языка с простым кэшем."""
+    if isinstance(source, str):
+        if language not in cache:
+            cache[language] = translate_report_text(post, language, source)
+        return cache[language]
+    if isinstance(source, Mapping):
+        return source.get(language) or source.get("ru") or next(iter(source.values()))
+
+    if language not in cache:
+        cache[language] = source(language)
+    return cache[language]

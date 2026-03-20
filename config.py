@@ -2,7 +2,7 @@
 
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Iterable, Optional
 
 
 # -------------------
@@ -31,6 +31,24 @@ def _env_int(name: str, default: int) -> int:
     if value is None or value == "":
         return default
     return int(value)
+
+
+def _env_int_list(name: str, default: Iterable[int]) -> tuple[int, ...]:
+    """Читает список целых чисел из env в формате `1,2,3`."""
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return tuple(default)
+
+    result = []
+    for part in value.split(","):
+        cleaned = part.strip()
+        if not cleaned:
+            continue
+        hour = int(cleaned)
+        if hour < 0 or hour > 23:
+            raise ValueError(f"{name} contains invalid hour: {hour}")
+        result.append(hour)
+    return tuple(result)
 
 
 # -------------------
@@ -64,6 +82,12 @@ def schedule_config(
         timezone=_env(f"SCHEDULE_{key}_TZ", default_timezone) or default_timezone,
         enabled=_env_bool(f"SCHEDULE_{key}_ENABLED", default_enabled),
     )
+
+
+def schedule_local_hours(name: str, default_hours: Iterable[int]) -> tuple[int, ...]:
+    """Возвращает локальные часы запуска для job, которые фильтруют точки внутри op."""
+    key = name.upper()
+    return _env_int_list(f"SCHEDULE_{key}_HOURS", default_hours)
 
 
 # -------------------
@@ -200,6 +224,40 @@ def openrouter_settings() -> OpenRouterSettings:
         retries=_env_int("OPENROUTER_RETRIES", 3),
         http_referer=_env("OPENROUTER_HTTP_REFERER"),
         app_title=_env("OPENROUTER_APP_TITLE", "aida_functions"),
+    )
+
+
+# -------------------
+# Pyrus
+# -------------------
+
+@dataclass(frozen=True)
+class PyrusSettings:
+    """Настройки доступа к Pyrus."""
+
+    login: Optional[str]
+    security_key: Optional[str]
+    base_url: str
+    timeout_seconds: int
+    retries: int
+    verify_ssl: bool
+    max_concurrent_requests: int
+    tickets_catalog_id: int
+    tickets_form_id: int
+
+
+def pyrus_settings() -> PyrusSettings:
+    """Собирает настройки Pyrus из env."""
+    return PyrusSettings(
+        login=_env('PYRUS_TOKEN'),
+        security_key=_env('PYRUS_KEY'),
+        base_url=_env('PYRUS_BASE_URL', 'https://api.pyrus.com/v4') or 'https://api.pyrus.com/v4',
+        timeout_seconds=_env_int('PYRUS_TIMEOUT_SECONDS', 30),
+        retries=_env_int('PYRUS_RETRIES', 3),
+        verify_ssl=_env_bool('PYRUS_VERIFY_SSL', False),
+        max_concurrent_requests=_env_int('PYRUS_MAX_CONCURRENT_REQUESTS', 10),
+        tickets_catalog_id=_env_int('PYRUS_TICKETS_CATALOG_ID', 56873),
+        tickets_form_id=_env_int('PYRUS_TICKETS_FORM_ID', 522023),
     )
 
 

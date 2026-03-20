@@ -4,7 +4,7 @@ from config import schedule_config
 from .jobs import metrics_job
 
 
-# Запускаем job каждый час, а внутри уже фильтруем точки по их локальным часам 14/19/23.
+# Запускаем job каждый час, а внутри уже фильтруем точки по локальным часам из env.
 _cfg = schedule_config("metrics", default_cron="0 * * * *")
 metrics_schedule = None
 if _cfg.enabled:

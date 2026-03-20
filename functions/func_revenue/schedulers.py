@@ -5,7 +5,7 @@ from config import schedule_config
 from .jobs import revenue_job
 
 
-_cfg = schedule_config("revenue", default_cron="0 9 * * *")
+_cfg = schedule_config("revenue", default_cron="0 * * * *")
 revenue_schedule = None
 if _cfg.enabled:
     revenue_schedule = ScheduleDefinition(
