@@ -150,9 +150,11 @@ async def select_report_subscriptions(
         async with sessionmaker() as session:
             orders_stmt = select(Orders).where(Orders.post == post)
             orders = (await session.execute(orders_stmt)).scalars().all()
+            fallback_account_ids_by_chat = _extract_fallback_account_ids_by_chat(orders)
             languages_by_chat = await _load_chat_languages_in_session(
                 session,
                 {order.chat_id for order in orders},
+                fallback_account_ids_by_chat=fallback_account_ids_by_chat,
             )
             for order in orders:
                 if not order.uuids:
@@ -201,9 +203,11 @@ async def select_report_subscriptions_many(
         async with sessionmaker() as session:
             orders_stmt = select(Orders).where(Orders.post.in_(post_list))
             orders = (await session.execute(orders_stmt)).scalars().all()
+            fallback_account_ids_by_chat = _extract_fallback_account_ids_by_chat(orders)
             languages_by_chat = await _load_chat_languages_in_session(
                 session,
                 {order.chat_id for order in orders},
+                fallback_account_ids_by_chat=fallback_account_ids_by_chat,
             )
             for order in orders:
                 if not order.uuids:
@@ -234,6 +238,8 @@ async def select_report_subscriptions_many(
 async def _load_chat_languages_in_session(
     session,
     chat_ids: Iterable[int],
+    *,
+    fallback_account_ids_by_chat: Optional[Dict[int, int]] = None,
 ) -> Dict[int, str]:
     """Читает языки чатов внутри уже открытой DB-сессии."""
     chat_id_list = [chat_id for chat_id in chat_ids if chat_id]
@@ -251,12 +257,27 @@ async def _load_chat_languages_in_session(
     for chat_id, language in rows:
         if chat_id not in result:
             result[int(chat_id)] = normalize_language(language)
+
+    missing_chat_ids = [
+        int(chat_id)
+        for chat_id in chat_id_list
+        if int(chat_id) not in result
+    ]
+    if missing_chat_ids and fallback_account_ids_by_chat:
+        fallback_languages = await _load_fallback_chat_languages_by_account_in_session(
+            session,
+            missing_chat_ids,
+            fallback_account_ids_by_chat,
+        )
+        result.update(fallback_languages)
     return result
 
 
 async def load_chat_languages(
     db: DatabaseResource,
     chat_ids: Iterable[int],
+    *,
+    fallback_account_ids_by_chat: Optional[Dict[int, int]] = None,
 ) -> Dict[int, str]:
     """Возвращает языки интерфейса по chat_id."""
     chat_id_list = [chat_id for chat_id in chat_ids if chat_id]
@@ -266,13 +287,69 @@ async def load_chat_languages(
     async def _action() -> Dict[int, str]:
         sessionmaker = db.get_sessionmaker()
         async with sessionmaker() as session:
-            return await _load_chat_languages_in_session(session, chat_id_list)
+            return await _load_chat_languages_in_session(
+                session,
+                chat_id_list,
+                fallback_account_ids_by_chat=fallback_account_ids_by_chat,
+            )
 
     return await _run_with_retry(
         operation_name="load_chat_languages",
         context=f"chat_ids={len(chat_id_list)}",
         action=_action,
     )
+
+
+def _extract_fallback_account_ids_by_chat(orders: Iterable[Orders]) -> Dict[int, int]:
+    """Выбирает account_id для fallback-языка по chat_id, если settings еще не заполнены."""
+    result: Dict[int, int] = {}
+    for order in orders:
+        if not order.chat_id or order.account_id is None:
+            continue
+        result.setdefault(int(order.chat_id), int(order.account_id))
+    return result
+
+
+def _infer_language_from_account_properties(properties: object) -> Optional[str]:
+    """Выводит базовый язык из properties аккаунта (`io/...` -> `ru`, `com/...` -> `en`)."""
+    raw = str(properties or "").strip().strip("/").lower()
+    if not raw:
+        return None
+
+    parts = [part for part in raw.split("/") if part]
+    if not parts:
+        return None
+    if parts[0] == "com" or parts[-1] in {"en", "us", "gb", "com"}:
+        return "en"
+    if parts[0] == "io" or parts[-1] in {"ru", "kz", "by", "uz"}:
+        return "ru"
+    return None
+
+
+async def _load_fallback_chat_languages_by_account_in_session(
+    session,
+    missing_chat_ids: Iterable[int],
+    fallback_account_ids_by_chat: Dict[int, int],
+) -> Dict[int, str]:
+    """Достраивает язык чата через account.properties, если в special.settings записи еще нет."""
+    chat_ids = [int(chat_id) for chat_id in missing_chat_ids if int(chat_id) in fallback_account_ids_by_chat]
+    if not chat_ids:
+        return {}
+
+    account_ids = sorted({fallback_account_ids_by_chat[chat_id] for chat_id in chat_ids})
+    stmt = select(Account.id, Account.properties).where(Account.id.in_(account_ids))
+    rows = (await session.execute(stmt)).all()
+    properties_by_account = {int(account_id): properties for account_id, properties in rows}
+
+    result: Dict[int, str] = {}
+    for chat_id in chat_ids:
+        account_id = fallback_account_ids_by_chat.get(chat_id)
+        if account_id is None:
+            continue
+        language = _infer_language_from_account_properties(properties_by_account.get(account_id))
+        if language:
+            result[chat_id] = normalize_language(language)
+    return result
 
 
 async def load_units_by_uuids(db: DatabaseResource, uuids: Iterable[str]) -> Dict[str, Unit]:

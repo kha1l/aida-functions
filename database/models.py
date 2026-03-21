@@ -228,7 +228,7 @@ class Subscribe(Base):
 # -------------------
 
 class Settings(Base):
-    """Пользовательские настройки, включая язык для чата."""
+    """Пользовательские настройки чата из `special.settings`."""
     __tablename__ = "settings"
     __table_args__ = {"schema": "special"}
 
@@ -239,6 +239,7 @@ class Settings(Base):
         nullable=False
     )
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    application_id: Mapped[Optional[int]] = mapped_column(Integer)
 
     user = relationship("User", back_populates="settings")
 

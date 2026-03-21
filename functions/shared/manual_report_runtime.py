@@ -74,7 +74,11 @@ async def run_manual_unit_report(
     account_auth_map = await load_accounts_and_tokens_bulk(db, {account_id})
     dodo_api.prime_account_token_cache(account_auth_map)
     account, _ = account_auth_map.get(account_id, (None, None))
-    chat_languages = await load_chat_languages(db, [chat_id])
+    chat_languages = await load_chat_languages(
+        db,
+        [chat_id],
+        fallback_account_ids_by_chat={int(chat_id): int(account_id)},
+    )
 
     request = ManualUnitReportRequest(
         unit_uuid=unit_uuid,

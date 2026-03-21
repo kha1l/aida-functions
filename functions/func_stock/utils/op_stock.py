@@ -185,7 +185,12 @@ async def run_stock_manual(context: OpExecutionContext) -> None:
 
     chat_id = int(context.op_config["chat_id"])
     topic_id = context.op_config.get("topic_id")
-    chat_languages = await load_chat_languages(db, [chat_id])
+    fallback_account_id = next(iter(sorted(all_account_ids)), None)
+    chat_languages = await load_chat_languages(
+        db,
+        [chat_id],
+        fallback_account_ids_by_chat={chat_id: fallback_account_id} if fallback_account_id is not None else None,
+    )
     report_language = chat_languages.get(chat_id, "ru")
 
     async with report_job_runtime(dodo_api, rabbitmq):
