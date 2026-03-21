@@ -268,6 +268,7 @@ async def _generate_birthday_greeting(
         details=details,
         tone=pick(language, "дружелюбный, живой и теплый", "friendly, lively and warm"),
     )
+    context.log.info(result)
     if not result.ok or not result.text:
         if result.error_html:
             context.log.warning(

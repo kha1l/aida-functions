@@ -90,7 +90,6 @@ async def run_revenue(context: OpExecutionContext) -> None:
                 local_now = resolve_unit_now(unit)
                 if local_now.hour not in TRIGGER_HOURS:
                     return
-
                 candidate_accounts = snapshot.candidate_accounts_for(unit_uuid)
                 if not candidate_accounts:
                     context.log.warning("revenue_op: нет токенов для unit %s", unit_uuid)
@@ -348,41 +347,122 @@ async def _fetch_revenue_total(
     return revenue_total, None, 200
 
 
-def _format_revenue_network_message(stats_items: List[RevenueUnitStats] | Tuple[RevenueUnitStats, ...] | object) -> str:
-    """Формирует итоговый Telegram-текст по сети с выровненными колонками."""
+# def _format_revenue_network_message(stats_items: List[RevenueUnitStats] | Tuple[RevenueUnitStats, ...] | object) -> str:
+#     """Формирует итоговый Telegram-текст по сети с выровненными колонками."""
+#     stats_list = sorted(list(stats_items), key=lambda item: item.unit_name.lower())
+#     total_current = sum((item.current_revenue for item in stats_list), Decimal("0"))
+#     total_previous = sum((item.previous_revenue for item in stats_list), Decimal("0"))
+
+#     display_rows = [
+#         (
+#             item.unit_name,
+#             _format_money(item.current_revenue),
+#             _format_change(item.current_revenue, item.previous_revenue),
+#         )
+#         for item in stats_list
+#     ]
+#     total_row = (
+#         "Итого:",
+#         _format_money(total_current),
+#         _format_change(total_current, total_previous),
+#     )
+
+#     name_width = max([len(row[0]) for row in display_rows] + [len(total_row[0])])
+#     revenue_width = max([len(row[1]) for row in display_rows] + [len(total_row[1])])
+
+#     lines = ["📊 <b>Выручка по сети:</b>"]
+#     for name, revenue, change in display_rows:
+#         lines.append(
+#             f"{html.escape(name):<{name_width}} | {revenue:>{revenue_width}} | {change}"
+#         )
+#     lines.append("")
+#     lines.append(
+#         f"{html.escape(total_row[0]):<{name_width}} | {total_row[1]:>{revenue_width}} | {total_row[2]}"
+#     )
+#     lines.append("#выручкаПоСети")
+#     return "\n".join(lines)
+
+
+def _format_revenue_network_message(
+    stats_items: List[RevenueUnitStats] | Tuple[RevenueUnitStats, ...] | object,
+) -> str:
     stats_list = sorted(list(stats_items), key=lambda item: item.unit_name.lower())
+
     total_current = sum((item.current_revenue for item in stats_list), Decimal("0"))
     total_previous = sum((item.previous_revenue for item in stats_list), Decimal("0"))
 
-    display_rows = [
-        (
-            item.unit_name,
-            _format_money(item.current_revenue),
-            _format_change(item.current_revenue, item.previous_revenue),
-        )
-        for item in stats_list
+    rows = []
+    growth_count = 0
+    decline_count = 0
+
+    best_growth_item = None
+    best_growth_value = None
+
+    worst_decline_item = None
+    worst_decline_value = None
+
+    leader_item = None
+
+    for item in stats_list:
+        revenue_str = _format_money(item.current_revenue)
+        delta_value = _calc_percent_change(item.current_revenue, item.previous_revenue)
+        delta_str = f"{delta_value:+d}%"
+
+        rows.append((item.unit_name, revenue_str, delta_str))
+
+        if delta_value > 0:
+            growth_count += 1
+            if best_growth_value is None or delta_value > best_growth_value:
+                best_growth_value = delta_value
+                best_growth_item = item
+        elif delta_value < 0:
+            decline_count += 1
+            if worst_decline_value is None or delta_value < worst_decline_value:
+                worst_decline_value = delta_value
+                worst_decline_item = item
+
+        if leader_item is None or item.current_revenue > leader_item.current_revenue:
+            leader_item = item
+
+    total_delta_value = _calc_percent_change(total_current, total_previous)
+
+    name_width = max(len(name) for name, _, _ in rows) if rows else 10
+    money_width = max(len(revenue) for _, revenue, _ in rows) if rows else 1
+    delta_width = max(len(delta) for _, _, delta in rows) if rows else 3
+
+    def format_row(name: str, revenue: str, delta: str) -> str:
+        return f"{html.escape(name):<{name_width}}  {revenue:>{money_width}}  {delta:>{delta_width}}"
+
+    report_lines = [
+        "📊 Выручка по сети",
+        "",
+        f"Итого: {_format_money(total_current)} ({total_delta_value:+d}%)",
+        "",
+        "Кратко:",
+        f"🟢 Рост: {growth_count} точек",
+        f"🔴 Снижение: {decline_count} точек",
     ]
-    total_row = (
-        "Итого:",
-        _format_money(total_current),
-        _format_change(total_current, total_previous),
-    )
 
-    name_width = max([len(row[0]) for row in display_rows] + [len(total_row[0])])
-    revenue_width = max([len(row[1]) for row in display_rows] + [len(total_row[1])])
-
-    lines = ["📊 <b>Выручка по сети:</b>", "<pre>"]
-    for name, revenue, change in display_rows:
-        lines.append(
-            f"{html.escape(name):<{name_width}} | {revenue:>{revenue_width}} | {change}"
+    if best_growth_item is not None:
+        report_lines.append(
+            f"🏆 Лучший рост: {html.escape(best_growth_item.unit_name)} ({best_growth_value:+d}%)"
         )
-    lines.append("")
-    lines.append(
-        f"{html.escape(total_row[0]):<{name_width}} | {total_row[1]:>{revenue_width}} | {total_row[2]}"
-    )
-    lines.append("</pre>")
-    lines.append("#выручкаПоСети")
-    return "\n".join(lines)
+
+    if worst_decline_item is not None:
+        report_lines.append(
+            f"📉 Худшее снижение: {html.escape(worst_decline_item.unit_name)} ({worst_decline_value:+d}%)"
+        )
+
+    if leader_item is not None:
+        report_lines.append(
+            f"💰 Лидер по выручке: {html.escape(leader_item.unit_name)} ({_format_money(leader_item.current_revenue)})"
+        )
+
+    report_lines.extend(["", "Рестораны:", "<pre>"])
+    report_lines.extend(format_row(*row) for row in rows)
+    report_lines.append("</pre>")
+
+    return "\n".join(report_lines)
 
 
 def _format_money(value: Decimal) -> str:
@@ -390,18 +470,24 @@ def _format_money(value: Decimal) -> str:
     return f"{int(value):,}".replace(",", " ")
 
 
-def _format_change(current: Decimal, previous: Decimal) -> str:
-    """Форматирует процент изменения к аналогичному периоду прошлой недели."""
-    if previous <= 0:
-        percent = 0
-    else:
-        percent = round((current * Decimal("100") / previous) - Decimal("100"))
+# def _format_change(current: Decimal, previous: Decimal) -> str:
+#     """Форматирует процент изменения к аналогичному периоду прошлой недели."""
+#     if previous <= 0:
+#         percent = 0
+#     else:
+#         percent = round((current * Decimal("100") / previous) - Decimal("100"))
 
-    if percent > 0:
-        return f"+{int(percent)}%"
-    if percent < 0:
-        return f"{int(percent)}% 🔻"
-    return "0%"
+#     if percent > 0:
+#         return f"+{int(percent)}%"
+#     if percent < 0:
+#         return f"{int(percent)}% 🔻"
+#     return "0%"
+
+
+def _calc_percent_change(current: Decimal, previous: Decimal) -> int:
+    if previous == 0:
+        return 0
+    return int(((current - previous) / previous * 100).quantize(Decimal("1")))
 
 
 def _to_decimal(value: object) -> Decimal:
