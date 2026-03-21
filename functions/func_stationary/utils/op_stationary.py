@@ -43,8 +43,10 @@ class StationarySalesStats:
     mobile_orders_total: int
     kiosk_orders_total: int
     tray_orders_total: int
-    combo_revenue_total: Decimal
-    added_ingredients_revenue_total: Decimal
+    dine_in_combo_revenue_total: Decimal
+    dine_in_added_ingredients_revenue_total: Decimal
+    kiosk_combo_revenue_total: Decimal
+    kiosk_added_ingredients_revenue_total: Decimal
 
 
 async def run_stationary(context: OpExecutionContext) -> None:
@@ -195,8 +197,10 @@ async def _fetch_stationary_sales_stats(
     kiosk_order_ids: Set[str] = set()
     tray_order_ids: Set[str] = set()
     revenue_total = Decimal("0")
-    combo_revenue_total = Decimal("0")
-    added_ingredients_revenue_total = Decimal("0")
+    dine_in_combo_revenue_total = Decimal("0")
+    dine_in_added_ingredients_revenue_total = Decimal("0")
+    kiosk_combo_revenue_total = Decimal("0")
+    kiosk_added_ingredients_revenue_total = Decimal("0")
 
     while True:
         params = dict(params_base)
@@ -213,14 +217,15 @@ async def _fetch_stationary_sales_stats(
         for sale in data.get("sales", []) or []:
             if not isinstance(sale, dict):
                 continue
-            if sale.get("salesChannel") != "Dine-in":
-                continue
-
             order_key = _build_order_key(sale.get("orderId"), sale.get("orderNumber"))
             if not order_key:
                 continue
 
-            order_ids.add(order_key)
+            sales_channel = str(sale.get("salesChannel") or "").strip()
+            # Базой для restaurant-отчета считаем только Dine-in продажи,
+            # а киоск нужен как отдельный подблок внутри отчета.
+            if sales_channel == "Dine-in":
+                order_ids.add(order_key)
 
             # Проценты по каналам считаем по уникальным заказам, а не по строкам продуктов.
             order_source = str(sale.get("orderSource") or "").strip()
@@ -234,14 +239,24 @@ async def _fetch_stationary_sales_stats(
             for product in sale.get("products", []) or []:
                 if not isinstance(product, dict):
                     continue
-                revenue_total += _to_decimal(product.get("priceWithDiscount"))
-                if product.get("combo") is not None:
-                    combo_revenue_total += _to_decimal(product.get("priceWithDiscount"))
+                product_price = _to_decimal(product.get("priceWithDiscount"))
+                if sales_channel == "Dine-in":
+                    revenue_total += product_price
+                    if product.get("combo") is not None:
+                        dine_in_combo_revenue_total += product_price
+                elif sales_channel == "Kiosk" and product.get("combo") is not None:
+                    # Выручку киоска в общий total не включаем, но отдельно
+                    # показываем ее продуктовые продажи в блоке про киоск.
+                    kiosk_combo_revenue_total += product_price
 
                 for ingredient in product.get("addedIngredients", []) or []:
                     if not isinstance(ingredient, dict):
                         continue
-                    added_ingredients_revenue_total += _to_decimal(ingredient.get("price"))
+                    ingredient_price = _to_decimal(ingredient.get("price"))
+                    if sales_channel == "Dine-in":
+                        dine_in_added_ingredients_revenue_total += ingredient_price
+                    elif sales_channel == "Kiosk":
+                        kiosk_added_ingredients_revenue_total += ingredient_price
 
         if data.get("isEndOfListReached"):
             break
@@ -254,8 +269,10 @@ async def _fetch_stationary_sales_stats(
             mobile_orders_total=len(mobile_order_ids),
             kiosk_orders_total=len(kiosk_order_ids),
             tray_orders_total=len(tray_order_ids),
-            combo_revenue_total=combo_revenue_total,
-            added_ingredients_revenue_total=added_ingredients_revenue_total,
+            dine_in_combo_revenue_total=dine_in_combo_revenue_total,
+            dine_in_added_ingredients_revenue_total=dine_in_added_ingredients_revenue_total,
+            kiosk_combo_revenue_total=kiosk_combo_revenue_total,
+            kiosk_added_ingredients_revenue_total=kiosk_added_ingredients_revenue_total,
         ),
         None,
         200,
@@ -312,19 +329,27 @@ def _format_stationary_message(
         sales_stats.kiosk_orders_total,
         sales_stats.orders_total,
     )
-    tray_percent = _format_share_percent(
-        sales_stats.tray_orders_total,
-        sales_stats.orders_total,
-    )
-    combo_revenue_percent = _format_percent(
+    dine_in_combo_revenue_percent = _format_percent(
         _share_decimal_percent(
-            sales_stats.combo_revenue_total,
+            sales_stats.dine_in_combo_revenue_total,
             sales_stats.revenue_total,
         )
     )
-    added_ingredients_revenue_percent = _format_percent(
+    dine_in_added_ingredients_revenue_percent = _format_percent(
         _share_decimal_percent(
-            sales_stats.added_ingredients_revenue_total,
+            sales_stats.dine_in_added_ingredients_revenue_total,
+            sales_stats.revenue_total,
+        )
+    )
+    kiosk_combo_revenue_percent = _format_percent(
+        _share_decimal_percent(
+            sales_stats.kiosk_combo_revenue_total,
+            sales_stats.revenue_total,
+        )
+    )
+    kiosk_added_ingredients_revenue_percent = _format_percent(
+        _share_decimal_percent(
+            sales_stats.kiosk_added_ingredients_revenue_total,
             sales_stats.revenue_total,
         )
     )
@@ -339,12 +364,25 @@ def _format_stationary_message(
         f"Долгие заказы: {long_orders_percent}%",
         f"Заказов через приложение: {sales_stats.mobile_orders_total} ({mobile_percent})",
         f"Заказов через киоск: {sales_stats.kiosk_orders_total} ({kiosk_percent})",
-        # f"Заказов на подносе: {sales_stats.tray_orders_total} ({tray_percent})",
-        f"Продаж комбо: {_format_money(sales_stats.combo_revenue_total)} ({combo_revenue_percent}%)",
+        "Продажи через ресторан:",
         (
-            "Продаж доп. ингредиентов: "
-            f"{_format_money(sales_stats.added_ingredients_revenue_total)} "
-            f"({added_ingredients_revenue_percent}%)"
+            f"     Комбо: {_format_money(sales_stats.dine_in_combo_revenue_total)} "
+            f"({dine_in_combo_revenue_percent}%)"
+        ),
+        (
+            "     Доп. ингредиенты: "
+            f"{_format_money(sales_stats.dine_in_added_ingredients_revenue_total)} "
+            f"({dine_in_added_ingredients_revenue_percent}%)"
+        ),
+        "Продажи через киоск:",
+        (
+            f"     Комбо: {_format_money(sales_stats.kiosk_combo_revenue_total)} "
+            f"({kiosk_combo_revenue_percent}%)"
+        ),
+        (
+            "     Доп. ингредиенты: "
+            f"{_format_money(sales_stats.kiosk_added_ingredients_revenue_total)} "
+            f"({kiosk_added_ingredients_revenue_percent}%)"
         ),
         "",
         "#отчетПоРесторану",

@@ -37,6 +37,7 @@ class WriteOffEntry:
     product_name: str
     reason: str
     amount: Decimal
+    quantity: Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +47,7 @@ class WeeklyFrequentWriteOff:
     product_name: str
     amount: Decimal
     count: int
+    quantity: Decimal
 
 
 async def run_writeoff(context: OpExecutionContext) -> None:
@@ -142,7 +144,10 @@ async def _build_writeoff_report(
     unit_name: str,
     account_id: int,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    """Собирает один daily-отчет по списаниям для выбранной точки."""
     dt_start, dt_end = _build_previous_local_day_window(unit)
+    # Частое списание считаем по скользящему окну последних 7 полных дней,
+    # включая сам отчетный день.
     week_start = dt_start - timedelta(days=6)
     date_label = dt_start.strftime("%d.%m")
 
@@ -272,9 +277,13 @@ async def _fetch_writeoffs(
                 continue
             rows_result.append(
                 WriteOffEntry(
+                    # `productName` уже приходит из API в человекочитаемом виде
+                    # и часто содержит фасовку (`1 шт`, `0,2 л`), поэтому ниже
+                    # мы больше не пытаемся вручную собирать название.
                     product_name=str(row.get("productName") or "Неизвестный продукт").strip(),
                     reason=str(row.get("reason") or "Unknown").strip() or "Unknown",
                     amount=_to_decimal(row.get("pricePerPiece")) * _to_decimal(row.get("quantity")),
+                    quantity=_to_decimal(row.get("quantity")),
                 )
             )
 
@@ -296,54 +305,73 @@ def _format_writeoff_message(
     """Формирует итоговый daily-отчет по списаниям."""
     reasons_totals = _aggregate_reason_totals(day_writeoffs)
     most_expensive = _find_most_expensive_writeoff(day_writeoffs)
-    slice_totals = {
-        reason: reasons_totals.get(reason, Decimal("0"))
-        for reason in SLICE_REASON_LABELS
-    }
 
     lines = [
-        f"🗑 <b>Списания за {date_label} в заведении {html.escape(unit_name)}</b>",
+        f"🗑 <b>Списания продуктов за {date_label} в заведении {html.escape(unit_name)}</b>",
         f"Выручка: {int(revenue_total)}",
         "",
     ]
 
     if reasons_totals:
-        lines.append("По причинам списания:")
-        for reason, amount in sorted(reasons_totals.items(), key=lambda item: item[1], reverse=True):
-            lines.append(
-                f"{_label_reason(reason)}: {int(amount)} ({_format_percent(_share_percent(amount, revenue_total))}%)"
-            )
+        lines.append("<b>По причинам списания:</b>")
+        lines.extend(_format_reason_lines(reasons_totals, revenue_total))
     else:
-        lines.append("По причинам списания:")
+        lines.append("<b>По причинам списания:</b>")
         lines.append("Списаний за день не найдено.")
-
-    # lines.append("")
-    # lines.append("Списания кусочков:")
-    # for reason, label in SLICE_REASON_LABELS.items():
-    #     lines.append(f"{label}: {int(slice_totals[reason])}")
 
     lines.append("")
     if most_expensive is not None:
+        lines.append("<b>Самое дорогое списание:</b>")
+        lines.append(f"{html.escape(most_expensive.product_name.strip())}:")
+        lines.append(f"        Количество: {_format_quantity(most_expensive.quantity)} шт.")
+        lines.append(f"        Стоимость: {int(most_expensive.amount)}")
         lines.append(
-            "Самое дорогое списание: "
-            f"{html.escape(most_expensive.product_name)} — {int(most_expensive.amount)} "
-            f"({_format_percent(_share_percent(most_expensive.amount, revenue_total))}%)"
+            f"        % от выручки: {_format_percent(_share_percent(most_expensive.amount, revenue_total))}%"
         )
     else:
-        lines.append("Самое дорогое списание: не найдено")
+        lines.append("<b>Самое дорогое списание:</b>")
+        lines.append("Не найдено")
 
+    lines.append("")
     if weekly_frequent is not None:
-        lines.append(
-            "Самое частое списание за неделю: "
-            f"{html.escape(weekly_frequent.product_name)} — {int(weekly_frequent.amount)}, "
-            f"{weekly_frequent.count} списаний"
-        )
+        lines.append("<b>Самое частое списание за 7 дней:</b>")
+        lines.append(f"{html.escape(weekly_frequent.product_name.strip())}:")
+        lines.append(f"        Стоимость: {int(weekly_frequent.amount)}")
+        lines.append(f"        Количество: {_format_quantity(weekly_frequent.quantity)} шт.")
+        lines.append(f"        Списаний: {weekly_frequent.count}")
     else:
-        lines.append("Самое частое списание за неделю: не найдено")
+        lines.append("<b>Самое частое списание за 7 дней:</b>")
+        lines.append("Не найдено")
 
     lines.append("")
     lines.append("#списания")
     return "\n".join(lines)
+
+
+def _format_reason_lines(
+    reasons_totals: Dict[str, Decimal],
+    revenue_total: Decimal,
+) -> List[str]:
+    """Форматирует блок причин списания с выровненными колонками."""
+    rows = [
+        (
+            _label_reason(reason),
+            str(int(amount)),
+            f"({_format_percent(_share_percent(amount, revenue_total))}%)",
+        )
+        for reason, amount in sorted(reasons_totals.items(), key=lambda item: item[1], reverse=True)
+    ]
+    if not rows:
+        return []
+
+    name_width = max(len(name) for name, _, _ in rows)
+    amount_width = max(len(amount) for _, amount, _ in rows)
+
+    formatted: List[str] = []
+    for name, amount, percent in rows:
+        row = f"{name:<{name_width}}  {amount:>{amount_width}}  {percent}"
+        formatted.append(f"<code>{html.escape(row).replace(' ', '&#160;')}</code>")
+    return formatted
 
 
 def _aggregate_reason_totals(rows: Iterable[WriteOffEntry]) -> Dict[str, Decimal]:
@@ -360,7 +388,7 @@ def _find_most_expensive_writeoff(rows: Iterable[WriteOffEntry]) -> Optional[Wri
 
 
 def _find_weekly_frequent_writeoff(rows: Iterable[WriteOffEntry]) -> Optional[WeeklyFrequentWriteOff]:
-    """Находит самое частое списание за неделю по названию продукта."""
+    """Находит самое частое списание за 7 дней по названию продукта."""
     aggregated: Dict[str, WeeklyFrequentWriteOff] = {}
     for row in rows:
         current = aggregated.get(row.product_name)
@@ -369,12 +397,16 @@ def _find_weekly_frequent_writeoff(rows: Iterable[WriteOffEntry]) -> Optional[We
                 product_name=row.product_name,
                 amount=row.amount,
                 count=1,
+                quantity=row.quantity,
             )
             continue
         aggregated[row.product_name] = WeeklyFrequentWriteOff(
             product_name=current.product_name,
             amount=current.amount + row.amount,
             count=current.count + 1,
+            # Показываем не только число событий, но и общий объем списанного
+            # товара за 7 дней.
+            quantity=current.quantity + row.quantity,
         )
 
     if not aggregated:
@@ -394,6 +426,9 @@ def _label_reason(reason: str) -> str:
         "Marketing": "Маркетинг",
         "ShowcaseWriteOff": "Списания кусочков",
         "ExpiredShowcaseTime": "Списания по времени с витрины",
+        "Expired": "Просрочка",
+        "Defected": "Брак",
+        "HumanElement": "Человеческий фактор",
     }
     return known.get(reason, reason)
 
@@ -411,6 +446,13 @@ def _format_percent(value: float) -> str:
     if float(rounded).is_integer():
         return str(int(rounded))
     return f"{rounded:.2f}".rstrip("0").rstrip(".").replace(".", ",")
+
+
+def _format_quantity(quantity: Decimal) -> str:
+    """Форматирует количество без лишних нулей."""
+    if quantity == quantity.to_integral_value():
+        return str(int(quantity))
+    return f"{float(quantity):g}"
 
 
 def _to_decimal(value: object) -> Decimal:

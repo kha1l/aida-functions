@@ -23,6 +23,8 @@ from functions.shared.unit_time import build_previous_local_hour_window
 
 MAX_CONCURRENT_UNITS = 15
 PAGE_SIZE = 900
+# Уведомление отправляем только если за предыдущий локальный час
+# накопилось минимум 3 позиции брака.
 MIN_DEFECTS_PER_HOUR = 3
 
 
@@ -32,6 +34,7 @@ class DefectItem:
 
     product_name: str
     sold_at: Optional[str]
+    price_with_discount: float
     added_ingredients: List[str] = field(default_factory=list)
     pizza_halves: List[str] = field(default_factory=list)
 
@@ -130,6 +133,7 @@ async def _build_defect_report(
     unit_name: str,
     account_id: int,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
+    """Строит текст отчета по браку за одно локальное часовое окно точки."""
     dt_start, dt_end = _build_report_window(unit)
     defects, error_html, error_status = await _fetch_defects(
         dodo_api=dodo_api,
@@ -159,6 +163,7 @@ async def _fetch_defects(
     dt_start: datetime,
     dt_end: datetime,
 ) -> tuple[Optional[List[DefectItem]], Optional[str], Optional[int]]:
+    """Читает все строки брака за период и нормализует их в DefectItem."""
     skip = 0
     defects: List[DefectItem] = []
 
@@ -185,10 +190,13 @@ async def _fetch_defects(
         for row in rows:
             if not isinstance(row, dict):
                 continue
+            # Для уведомления сохраняем только стабильные поля, которые реально
+            # показываем пользователю: название, время продажи, цену и состав.
             defects.append(
                 DefectItem(
                     product_name=str(row.get("productName") or "Неизвестный продукт").strip(),
                     sold_at=_extract_time(row.get("soldAtLocal") or row.get("soldAt")),
+                    price_with_discount=_to_float(row.get("priceWithDiscount")),
                     added_ingredients=_extract_nested_names(row.get("addedIngredients")),
                     pizza_halves=_extract_nested_names(row.get("pizzaHalves")),
                 )
@@ -198,6 +206,7 @@ async def _fetch_defects(
             break
         skip += PAGE_SIZE
 
+    # Сортировка по времени помогает читать часовой отчет как ленту событий.
     defects.sort(key=lambda item: (item.sold_at or "", item.product_name))
     return defects, None, 200
 
@@ -218,7 +227,11 @@ def _format_defect_message(
     ]
 
     for defect in defects:
-        lines.append(f"Наименование продукта: {html.escape(defect.product_name)}")
+        lines.append(f"<b>{html.escape(defect.product_name)}</b>")
+        if defect.price_with_discount > 0:
+            lines.append(f"    Стоимость: {_format_money(defect.price_with_discount)}")
+        if defect.sold_at:
+            lines.append(f"    Время: {defect.sold_at}")
         for ingredient_name in defect.added_ingredients:
             lines.append(f"    Добавленный ингредиент: {html.escape(ingredient_name)}")
         for half_name in defect.pizza_halves:
@@ -260,6 +273,22 @@ def _extract_nested_names(value: object) -> List[str]:
             continue
         names.append(name)
     return names
+
+
+def _to_float(value: object) -> float:
+    """Безопасно приводит значение к float для денежных полей."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_money(value: float) -> str:
+    """Форматирует денежное значение без лишних нулей."""
+    rounded = round(value, 2)
+    if float(rounded).is_integer():
+        return str(int(rounded))
+    return f"{rounded:.2f}".rstrip("0").rstrip(".").replace(".", ",")
 
 
 def _extract_name(value: object) -> Optional[str]:

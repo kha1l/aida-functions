@@ -1,12 +1,12 @@
 # aida_functions
 
-`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API и OpenRouter и публикует готовые payload в RabbitMQ.
+`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API / Pyrus / OpenRouter и публикует готовые payload в RabbitMQ.
 
 ## Что внутри
 
 - daily jobs по расписанию: курьеры, ресторан, метрики, отказы, брак, списания, дни рождения, юбилеи/стаж и другие;
 - manual jobs без расписания, которые запускаются из `aida3` по нажатию кнопок;
-- shared Dagster-ресурсы для БД, RabbitMQ, Dodo API и OpenRouter;
+- shared Dagster-ресурсы для БД, RabbitMQ, Dodo API, OpenRouter и Pyrus;
 - bulk-запросы к БД в `database/requests.py`, чтобы job'ы меньше дергали PostgreSQL;
 - локализация текстов отчетов по языку чата из `special.settings.country` (`ru` / `en`);
 - общий runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`;
@@ -41,7 +41,7 @@
 - `stock_job` — запускается каждый час и отправляет отчет только точкам, у которых локальное время равно `08:00` или `15:00`
 - `stops_job` — каждые 5 минут собирает четыре типа stop-отчетов (`stops_rest`, `stops_ings`, `stops_key_ings`, `stops_sector`) за предыдущее завершенное локальное 5-минутное окно точки
 - `tickets_job` — каждые 5 минут читает Pyrus и отправляет тикеты клиентов за предыдущее завершенное 5-минутное окно
-- `writeoff_job` — daily-отчет по списаниям за предыдущий полный локальный день точки
+- `writeoff_job` — daily-отчет по списаниям за предыдущий полный локальный день точки, включая самое дорогое списание за день и самое частое списание за 7 дней
 
 ## Manual jobs
 
@@ -70,7 +70,7 @@
 
 1. Job получает подписки и связанные аккаунты из PostgreSQL.
 2. Для каждой точки выбирается рабочий токен Dodo API.
-3. Собирается один или несколько текстовых блоков отчета.
+3. Собирается один или несколько текстовых блоков отчета с учетом локального времени точки и формата Telegram.
 4. Для каждого подписчика строится payload вида `chat_id + post + text + topic_id + unit_uuid`.
 5. Payload публикуется в RabbitMQ, откуда его забирает `aida3`.
 
@@ -179,4 +179,5 @@ SCHEDULE_METRICS_HOURS=14,19,23
 - `functions/shared/manual_report_runtime.py` дает единый lifecycle для manual-отчетов.
 - `functions/shared/report_text_i18n.py` переводит готовые тексты отчетов на язык чата без дублирования бизнес-логики.
 - `functions/shared/definition_resources.py` не дает модульным `definitions.py` разъехаться по набору ресурсов.
+- В `func_revenue` и части блоков `func_writeoff` используется моноширинное форматирование для ровных колонок в Telegram, а карточки событий (`defect`, нижняя часть `writeoff`, `tracking`) остаются обычным HTML-текстом.
 - `aida3` запускает manual jobs через Dagster GraphQL и получает готовые сообщения из очереди.

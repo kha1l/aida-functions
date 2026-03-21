@@ -32,8 +32,8 @@ class TrackingEntry:
 
     product_name: str
     products_count: int
-    avg_total: str
-    avg_total_seconds: int
+    total_duration: str
+    total_duration_seconds: int
 
 
 async def run_tracking(context: OpExecutionContext) -> None:
@@ -178,17 +178,16 @@ def _collect_tracking_entries(
         if item_unit_uuid and item_unit_uuid != unit_uuid.lower():
             continue
 
-        avg_total = str(item.get("avgTotal") or "00:00:00").strip() or "00:00:00"
-        avg_total_seconds = _parse_hhmmss_to_seconds(avg_total)
-        if avg_total_seconds is None:
+        total_duration_seconds = _sum_station_durations(item.get("stations"))
+        if total_duration_seconds is None:
             continue
 
         entries.append(
             TrackingEntry(
                 product_name=str(item.get("productName") or "-").strip() or "-",
                 products_count=_to_int(item.get("productsCount")) or 0,
-                avg_total=avg_total,
-                avg_total_seconds=avg_total_seconds,
+                total_duration=_format_seconds_to_hhmmss(total_duration_seconds),
+                total_duration_seconds=total_duration_seconds,
             )
         )
 
@@ -205,7 +204,6 @@ def _format_tracking_block(
     date_label = _format_date(report_date)
     lines = [
         f"🛰 <b>Трекинг за {date_label} в заведении {html.escape(unit_name)}</b>",
-        "",
     ]
 
     if not entries:
@@ -214,37 +212,31 @@ def _format_tracking_block(
 
     top_by_count = sorted(
         entries,
-        key=lambda item: (-item.products_count, item.avg_total_seconds, item.product_name.lower()),
+        key=lambda item: (-item.products_count, item.total_duration_seconds, item.product_name.lower()),
     )[:TOP_LIMIT]
+    # Во втором блоке специально поднимаем наверх самые долгие продукты.
     top_by_duration = sorted(
         entries,
-        key=lambda item: (-item.avg_total_seconds, -item.products_count, item.product_name.lower()),
+        key=lambda item: (-item.total_duration_seconds, -item.products_count, item.product_name.lower()),
     )[:TOP_LIMIT]
 
-    lines.append("Топ-5 по productsCount:")
-    lines.extend(_format_tracking_lines(top_by_count, count_first=True))
+    lines.append("⬆️ Топ-5 по количеству:")
+    lines.extend(_format_tracking_lines(top_by_count))
     lines.append("")
-    lines.append("Bottom-5 по avgTotal (самое долгое):")
-    lines.extend(_format_tracking_lines(top_by_duration, count_first=False))
+    lines.append("⬇️ Tоп-5 по самому долгому времени:")
+    lines.extend(_format_tracking_lines(top_by_duration))
     return "\n".join(lines).rstrip()
 
 
-def _format_tracking_lines(
-    entries: Iterable[TrackingEntry],
-    *,
-    count_first: bool,
-) -> List[str]:
+def _format_tracking_lines(entries: Iterable[TrackingEntry]) -> List[str]:
     """Форматирует список продуктов в строки отчета."""
     lines: List[str] = []
     for index, entry in enumerate(entries, start=1):
-        if count_first:
-            lines.append(
-                f"{index}. {html.escape(entry.product_name)} — {entry.products_count} шт. — {entry.avg_total}"
-            )
-        else:
-            lines.append(
-                f"{index}. {html.escape(entry.product_name)} — {entry.avg_total} — {entry.products_count} шт."
-            )
+        # Формат делаем двухстрочным: так длинные названия читаются лучше,
+        # чем в одну строку с несколькими колонками.
+        lines.append(f"{index}. {html.escape(entry.product_name)}:")
+        lines.append(f"        Приготовлено: {entry.products_count} шт.")
+        lines.append(f"        Среднее время: {entry.total_duration}")
     return lines
 
 
@@ -285,6 +277,34 @@ def _parse_hhmmss_to_seconds(value: object) -> Optional[int]:
     if hours < 0 or minutes < 0 or seconds < 0:
         return None
     return hours * 3600 + minutes * 60 + seconds
+
+
+def _sum_station_durations(value: object) -> Optional[int]:
+    """Суммирует `avgDuration` по всем станциям продукта."""
+    if not isinstance(value, list):
+        return None
+
+    total_seconds = 0
+    has_station_duration = False
+    for station in value:
+        if not isinstance(station, dict):
+            continue
+        duration_seconds = _parse_hhmmss_to_seconds(station.get("avgDuration"))
+        if duration_seconds is None:
+            continue
+        has_station_duration = True
+        total_seconds += duration_seconds
+
+    if not has_station_duration:
+        return None
+    return total_seconds
+
+
+def _format_seconds_to_hhmmss(value: int) -> str:
+    """Преобразует секунды в строку `HH:MM:SS`."""
+    hours, remainder = divmod(value, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def _format_date(value: str) -> str:

@@ -76,9 +76,11 @@ async def run_revenue(context: OpExecutionContext) -> None:
     unit_stats_by_uuid: Dict[str, RevenueUnitStats] = {}
     unit_stats_lock = asyncio.Lock()
     unit_uuids = list(snapshot.subs_by_unit.keys())
+    report_time_str: Optional[str] = None
 
     async with report_job_runtime(dodo_api, rabbitmq):
         async def process_unit(unit_uuid: str) -> None:
+            nonlocal report_time_str
             async with semaphore:
                 subscribers = snapshot.subscribers_for(unit_uuid)
                 unit = snapshot.unit_for(unit_uuid)
@@ -88,6 +90,8 @@ async def run_revenue(context: OpExecutionContext) -> None:
                     return
 
                 local_now = resolve_unit_now(unit)
+                if report_time_str is None:
+                    report_time_str = local_now.strftime("%H:%M")
                 if local_now.hour not in TRIGGER_HOURS:
                     return
                 candidate_accounts = snapshot.candidate_accounts_for(unit_uuid)
@@ -139,6 +143,8 @@ async def run_revenue(context: OpExecutionContext) -> None:
 
         await asyncio.gather(*(process_unit(unit_uuid) for unit_uuid in unit_uuids))
 
+        # Сначала собираем статистику по точкам, а уже потом группируем
+        # подписчиков по chat/topic и сети франчайзи.
         grouped_units_by_target: Dict[Tuple[int, Optional[int], str, str], Dict[str, RevenueUnitStats]] = defaultdict(dict)
         for unit_uuid, stats in unit_stats_by_uuid.items():
             network_key = franchisee_group_by_unit.get(unit_uuid) or unit_uuid
@@ -146,13 +152,14 @@ async def run_revenue(context: OpExecutionContext) -> None:
                 target_key = (sub.chat_id, sub.topic_id, network_key, sub.language)
                 grouped_units_by_target[target_key][unit_uuid] = stats
 
+        time_hint = report_time_str or datetime.utcnow().strftime("%H:%M")
         for (chat_id, topic_id, _network_key, language), grouped_units in grouped_units_by_target.items():
             if not grouped_units:
                 continue
             message = translate_report_text(
                 "revenue",
                 language,
-                _format_revenue_network_message(grouped_units.values()),
+                _format_revenue_network_message(grouped_units.values(), time_hint),
             )
             payload = build_payload(
                 chat_id=chat_id,
@@ -191,10 +198,13 @@ async def run_revenue_manual(context: OpExecutionContext) -> None:
 
     async with report_job_runtime(dodo_api, rabbitmq):
         unit_stats: List[RevenueUnitStats] = []
+        report_time_str: Optional[str] = None
 
         for unit_uuid in unit_uuids:
             unit = units.get(unit_uuid)
             local_now = resolve_unit_now(unit)
+            if report_time_str is None:
+                report_time_str = local_now.strftime("%H:%M")
             candidate_accounts = candidate_accounts_by_unit.get(unit_uuid, [])
             if not candidate_accounts:
                 context.log.warning("revenue_manual_op: нет токенов для unit %s", unit_uuid)
@@ -246,7 +256,7 @@ async def run_revenue_manual(context: OpExecutionContext) -> None:
             text=translate_report_text(
                 "revenue",
                 report_language,
-                _format_revenue_network_message(unit_stats),
+                _format_revenue_network_message(unit_stats, report_time_str or datetime.utcnow().strftime("%H:%M")),
             ),
             unit_uuid=None,
         )
@@ -347,45 +357,11 @@ async def _fetch_revenue_total(
     return revenue_total, None, 200
 
 
-# def _format_revenue_network_message(stats_items: List[RevenueUnitStats] | Tuple[RevenueUnitStats, ...] | object) -> str:
-#     """Формирует итоговый Telegram-текст по сети с выровненными колонками."""
-#     stats_list = sorted(list(stats_items), key=lambda item: item.unit_name.lower())
-#     total_current = sum((item.current_revenue for item in stats_list), Decimal("0"))
-#     total_previous = sum((item.previous_revenue for item in stats_list), Decimal("0"))
-
-#     display_rows = [
-#         (
-#             item.unit_name,
-#             _format_money(item.current_revenue),
-#             _format_change(item.current_revenue, item.previous_revenue),
-#         )
-#         for item in stats_list
-#     ]
-#     total_row = (
-#         "Итого:",
-#         _format_money(total_current),
-#         _format_change(total_current, total_previous),
-#     )
-
-#     name_width = max([len(row[0]) for row in display_rows] + [len(total_row[0])])
-#     revenue_width = max([len(row[1]) for row in display_rows] + [len(total_row[1])])
-
-#     lines = ["📊 <b>Выручка по сети:</b>"]
-#     for name, revenue, change in display_rows:
-#         lines.append(
-#             f"{html.escape(name):<{name_width}} | {revenue:>{revenue_width}} | {change}"
-#         )
-#     lines.append("")
-#     lines.append(
-#         f"{html.escape(total_row[0]):<{name_width}} | {total_row[1]:>{revenue_width}} | {total_row[2]}"
-#     )
-#     lines.append("#выручкаПоСети")
-#     return "\n".join(lines)
-
-
 def _format_revenue_network_message(
     stats_items: List[RevenueUnitStats] | Tuple[RevenueUnitStats, ...] | object,
+    report_time_str: Optional[str],
 ) -> str:
+    """Формирует итоговый текст по сети с кратким summary и списком точек."""
     stats_list = sorted(list(stats_items), key=lambda item: item.unit_name.lower())
 
     total_current = sum((item.current_revenue for item in stats_list), Decimal("0"))
@@ -431,10 +407,13 @@ def _format_revenue_network_message(
     delta_width = max(len(delta) for _, _, delta in rows) if rows else 3
 
     def format_row(name: str, revenue: str, delta: str) -> str:
-        return f"{html.escape(name):<{name_width}}  {revenue:>{money_width}}  {delta:>{delta_width}}"
+        row = f"{name:<{name_width}}  {revenue:>{money_width}}  {delta:>{delta_width}}"
+        # Для ровных колонок в Telegram нужен моноширинный шрифт.
+        return f"<code>{html.escape(row).replace(' ', '&#160;')}</code>"
 
+    time_label = f" на {report_time_str}" if report_time_str else ""
     report_lines = [
-        "📊 Выручка по сети",
+        f"📊 Выручка по сети{time_label}",
         "",
         f"Итого: {_format_money(total_current)} ({total_delta_value:+d}%)",
         "",
@@ -458,9 +437,9 @@ def _format_revenue_network_message(
             f"💰 Лидер по выручке: {html.escape(leader_item.unit_name)} ({_format_money(leader_item.current_revenue)})"
         )
 
-    report_lines.extend(["", "Рестораны:", "<pre>"])
+    report_lines.extend([""])
     report_lines.extend(format_row(*row) for row in rows)
-    report_lines.append("</pre>")
+    report_lines.extend(["", "#выручкаПоСети"])
 
     return "\n".join(report_lines)
 
@@ -485,6 +464,7 @@ def _format_money(value: Decimal) -> str:
 
 
 def _calc_percent_change(current: Decimal, previous: Decimal) -> int:
+    """Считает изменение в процентах к аналогичному периоду."""
     if previous == 0:
         return 0
     return int(((current - previous) / previous * 100).quantize(Decimal("1")))
