@@ -99,7 +99,11 @@ async def load_account_and_token(
         """Читает аккаунт и последний токен в одной DB-сессии."""
         sessionmaker = db.get_sessionmaker()
         async with sessionmaker() as session:
-            account = await session.get(Account, account_id)
+            account_stmt = select(Account).where(
+                Account.id == account_id,
+                Account.active.is_not(False),
+            )
+            account = (await session.execute(account_stmt)).scalar_one_or_none()
             if account is None:
                 return None, None
 
@@ -148,7 +152,14 @@ async def select_report_subscriptions(
         sessionmaker = db.get_sessionmaker()
         subscriptions: List[ReportSubscription] = []
         async with sessionmaker() as session:
-            orders_stmt = select(Orders).where(Orders.post == post)
+            orders_stmt = (
+                select(Orders)
+                .join(Account, Orders.account_id == Account.id)
+                .where(
+                    Orders.post == post,
+                    Account.active.is_not(False),
+                )
+            )
             orders = (await session.execute(orders_stmt)).scalars().all()
             fallback_account_ids_by_chat = _extract_fallback_account_ids_by_chat(orders)
             languages_by_chat = await _load_chat_languages_in_session(
@@ -201,7 +212,14 @@ async def select_report_subscriptions_many(
         sessionmaker = db.get_sessionmaker()
         subscriptions: List[ReportSubscription] = []
         async with sessionmaker() as session:
-            orders_stmt = select(Orders).where(Orders.post.in_(post_list))
+            orders_stmt = (
+                select(Orders)
+                .join(Account, Orders.account_id == Account.id)
+                .where(
+                    Orders.post.in_(post_list),
+                    Account.active.is_not(False),
+                )
+            )
             orders = (await session.execute(orders_stmt)).scalars().all()
             fallback_account_ids_by_chat = _extract_fallback_account_ids_by_chat(orders)
             languages_by_chat = await _load_chat_languages_in_session(
@@ -428,9 +446,11 @@ async def select_account_ids_for_units(
             query = (
                 select(Subscribe.uuid, Token.account_id, Token.last_update, Token.id)
                 .join(Token, Subscribe.token_id == Token.id)
+                .join(Account, Token.account_id == Account.id)
                 .where(
                     Subscribe.uuid.in_(unit_uuid_list),
                     Token.application_id == TOKEN_APPLICATION_ID,
+                    Account.active.is_not(False),
                 )
                 .order_by(Subscribe.uuid, Token.last_update.desc(), Token.id.desc())
             )
@@ -490,8 +510,18 @@ async def load_accounts_and_tokens_bulk(
         """Читает аккаунты и последние токены для списка account_id."""
         sessionmaker = db.get_sessionmaker()
         async with sessionmaker() as session:
-            account_stmt = select(Account).where(Account.id.in_(account_id_list))
+            account_stmt = select(Account).where(
+                Account.id.in_(account_id_list),
+                Account.active.is_not(False),
+            )
             accounts = (await session.execute(account_stmt)).scalars().all()
+            active_account_ids = [account.id for account in accounts]
+
+            if not active_account_ids:
+                return {
+                    account_id: (None, None)
+                    for account_id in account_id_list
+                }
 
             ranked_tokens = (
                 select(
@@ -505,7 +535,7 @@ async def load_accounts_and_tokens_bulk(
                     .label("rn"),
                 )
                 .where(
-                    Token.account_id.in_(account_id_list),
+                    Token.account_id.in_(active_account_ids),
                     Token.application_id == TOKEN_APPLICATION_ID,
                 )
                 .subquery()
