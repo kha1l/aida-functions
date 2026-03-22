@@ -21,4 +21,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["dagster", "api", "grpc", "-m", "defs"]
+EXPOSE 4000
+
+CMD ["dagster", "api", "grpc", "-m", "defs", "-h", "0.0.0.0", "-p", "4000"]
