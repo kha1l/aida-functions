@@ -5,7 +5,7 @@ from config import schedule_config
 from .jobs import staff_job
 
 
-_cfg = schedule_config("staff", default_cron="0 9 * * *")
+_cfg = schedule_config("staff", default_cron="0 * * * *")
 staff_schedule = None
 if _cfg.enabled:
     staff_schedule = ScheduleDefinition(

@@ -720,8 +720,8 @@ def _format_metrics_message(
         f"Время приготовления в ресторан: {avg_rest_prep}",
         f"Время приготовления на доставку: {avg_delivery_cooking}",
         f"Процент долгих приготовлений: {_format_percent(long_dine_in_percent)}%",
-        f"Средняя оценка заказов, сделанных в ресторане: {_format_rating(customer_ratings.avg_dine_in_order_rate, customer_ratings.dine_in_rate_count)}",
-        f"Средняя оценка заказов, сделанных на доставку: {_format_rating(customer_ratings.avg_delivery_order_rate, customer_ratings.delivery_rate_count)}",
+        f"Рейтинг клиента в ресторане: {_format_rating(customer_ratings.avg_dine_in_order_rate, customer_ratings.dine_in_rate_count)}",
+        f"Рейтинг клиента на доставку: {_format_rating(customer_ratings.avg_delivery_order_rate, customer_ratings.delivery_rate_count)}",
         "",
         "#метрики",
     ]

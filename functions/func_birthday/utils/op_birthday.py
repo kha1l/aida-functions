@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 
 from dagster import OpExecutionContext
 
+from config import schedule_local_hours
 from database.requests import select_report_subscriptions
 from functions.shared.report_job_runtime import (
     load_report_job_snapshot,
@@ -20,10 +21,11 @@ from functions.shared.report_job_runtime import (
 )
 from functions.shared.greeting_utils import normalize_single_sentence_greeting_html
 from functions.shared.i18n import is_english, pick
-from functions.shared.unit_time import resolve_unit_today
+from functions.shared.unit_time import resolve_unit_now, resolve_unit_today
 
 MAX_CONCURRENT_UNITS = 15
 STAFF_MEMBERS_TAKE = 990
+TRIGGER_HOURS = set(schedule_local_hours("birthday", (8,)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +57,16 @@ async def run_birthday(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_UNITS)
     publish_lock = asyncio.Lock()
-    unit_uuids = list(snapshot.subs_by_unit.keys())
+    unit_uuids = [
+        unit_uuid
+        for unit_uuid in snapshot.subs_by_unit.keys()
+        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+    ]
+    if not unit_uuids:
+        context.log.info(
+            "birthday_op: нет точек на локальные часы из SCHEDULE_BIRTHDAY_HOURS",
+        )
+        return
 
     async with report_job_runtime(dodo_api, rabbitmq, openrouter=openrouter):
         async def process_unit(unit_uuid: str) -> None:

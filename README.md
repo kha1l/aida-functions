@@ -154,20 +154,30 @@ dagster job execute -m defs -j couriers_job
 - `SCHEDULE_<NAME>_TZ`
 - `SCHEDULE_<NAME>_ENABLED`
 - `SCHEDULE_TZ_DEFAULT`
-- `SCHEDULE_<NAME>_HOURS` — для job, которые запускаются часто, но отправляют отчет только в заданные локальные часы точки (`metrics`, `revenue`, `stock`)
+- `SCHEDULE_<NAME>_HOURS` — для job, которые запускаются часто, но отправляют отчет только в заданные локальные часы точки (`metrics`, `revenue`, `stock`, `couriers`, `birthday`, `staff`, `stationary`, `writeoff`)
 
 Пример:
 
 ```env
 SCHEDULE_TZ_DEFAULT=UTC
-SCHEDULE_BIRTHDAY_CRON=0 9 * * *
+SCHEDULE_BIRTHDAY_CRON=0 * * * *
 SCHEDULE_BIRTHDAY_TZ=UTC
 SCHEDULE_BIRTHDAY_ENABLED=true
+SCHEDULE_BIRTHDAY_HOURS=8
 
 SCHEDULE_METRICS_CRON=0 * * * *
 SCHEDULE_METRICS_TZ=UTC
 SCHEDULE_METRICS_ENABLED=true
 SCHEDULE_METRICS_HOURS=14,19,23
+
+SCHEDULE_COURIERS_CRON=0 * * * *
+SCHEDULE_COURIERS_HOURS=7
+SCHEDULE_STAFF_CRON=0 * * * *
+SCHEDULE_STAFF_HOURS=9
+SCHEDULE_STATIONARY_CRON=0 * * * *
+SCHEDULE_STATIONARY_HOURS=10
+SCHEDULE_WRITEOFF_CRON=0 * * * *
+SCHEDULE_WRITEOFF_HOURS=11
 ```
 
 ## Полезные детали

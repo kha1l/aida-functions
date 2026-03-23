@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Set
 
 from dagster import OpExecutionContext
 from functions.shared.manual_report_runtime import to_int
+from config import schedule_local_hours
 from functions.shared.report_job_runtime import (
     load_report_job_snapshot,
     log_auth_error,
@@ -19,10 +20,11 @@ from functions.shared.report_job_runtime import (
 )
 
 from database.requests import select_report_subscriptions
-from functions.shared.unit_time import build_previous_local_day_window
+from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
 
 PAGE_SIZE = 500
 MAX_CONCURRENT_UNITS = 15
+TRIGGER_HOURS = set(schedule_local_hours("stationary", (10,)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +69,16 @@ async def run_stationary(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_UNITS)
     publish_lock = asyncio.Lock()
-    unit_uuids = list(snapshot.subs_by_unit.keys())
+    unit_uuids = [
+        unit_uuid
+        for unit_uuid in snapshot.subs_by_unit.keys()
+        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+    ]
+    if not unit_uuids:
+        context.log.info(
+            "stationary_op: нет точек на локальные часы из SCHEDULE_STATIONARY_HOURS",
+        )
+        return
 
     async with report_job_runtime(dodo_api, rabbitmq):
         async def process_unit(unit_uuid: str) -> None:
@@ -229,7 +240,7 @@ async def _fetch_stationary_sales_stats(
 
             # Проценты по каналам считаем по уникальным заказам, а не по строкам продуктов.
             order_source = str(sale.get("orderSource") or "").strip()
-            if order_source == "MobileApp":
+            if order_source == "MobileApp" and sales_channel == "Dine-in":
                 mobile_order_ids.add(order_key)
             if order_source == "Kiosk":
                 kiosk_order_ids.add(order_key)
@@ -240,11 +251,11 @@ async def _fetch_stationary_sales_stats(
                 if not isinstance(product, dict):
                     continue
                 product_price = _to_decimal(product.get("priceWithDiscount"))
-                if sales_channel == "Dine-in":
+                if order_source == "Dine-in":
                     revenue_total += product_price
                     if product.get("combo") is not None:
                         dine_in_combo_revenue_total += product_price
-                elif sales_channel == "Kiosk" and product.get("combo") is not None:
+                elif order_source == "Kiosk" and product.get("combo") is not None:
                     # Выручку киоска в общий total не включаем, но отдельно
                     # показываем ее продуктовые продажи в блоке про киоск.
                     kiosk_combo_revenue_total += product_price
@@ -253,9 +264,9 @@ async def _fetch_stationary_sales_stats(
                     if not isinstance(ingredient, dict):
                         continue
                     ingredient_price = _to_decimal(ingredient.get("price"))
-                    if sales_channel == "Dine-in":
+                    if order_source == "Dine-in":
                         dine_in_added_ingredients_revenue_total += ingredient_price
-                    elif sales_channel == "Kiosk":
+                    elif order_source == "Kiosk":
                         kiosk_added_ingredients_revenue_total += ingredient_price
 
         if data.get("isEndOfListReached"):

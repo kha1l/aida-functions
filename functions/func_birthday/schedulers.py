@@ -5,7 +5,7 @@ from config import schedule_config
 from .jobs import birthday_job
 
 
-_cfg = schedule_config("birthday", default_cron="0 9 * * *")
+_cfg = schedule_config("birthday", default_cron="0 * * * *")
 birthday_schedule = None
 if _cfg.enabled:
     birthday_schedule = ScheduleDefinition(

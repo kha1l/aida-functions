@@ -13,10 +13,13 @@ from functions.shared.report_job_runtime import (
     log_final_unit_error,
     publish_report_to_subscribers,
 )
-from functions.shared.unit_time import build_previous_local_day_window
+from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
 
-from config import couriers_settings, WeatherSettings, weather_settings
+from config import couriers_settings, WeatherSettings, schedule_local_hours, weather_settings
 from database.requests import select_couriers_subscriptions
+
+
+TRIGGER_HOURS = set(schedule_local_hours("couriers", (7,)))
 
 
 async def run_couriers(context: OpExecutionContext) -> None:
@@ -39,7 +42,16 @@ async def run_couriers(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(couriers_cfg.max_concurrent_units)
     publish_lock = asyncio.Lock()
-    unit_uuids = list(snapshot.subs_by_unit.keys())
+    unit_uuids = [
+        unit_uuid
+        for unit_uuid in snapshot.subs_by_unit.keys()
+        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+    ]
+    if not unit_uuids:
+        context.log.info(
+            "couriers_op: нет точек на локальные часы из SCHEDULE_COURIERS_HOURS",
+        )
+        return
 
     # Кеш погоды общий на весь job, чтобы несколько чатов одной точки не дублировали запрос.
     weather_tasks: Dict[Tuple[str, str], asyncio.Task[str]] = {}
@@ -427,8 +439,8 @@ def _calculate_long_deliveries_percent(
 
 def _long_delivery_threshold_seconds(market_code: Optional[str]) -> int:
     """Возвращает порог долгой доставки в секундах по рынку."""
-    if (market_code or "").strip().lower() == "ru":
-        return 45 * 60
+    if (market_code or "").strip().lower() in ["ru", "uz"]:
+        return 40 * 60
     return 35 * 60
 
 

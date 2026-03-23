@@ -5,7 +5,7 @@ from config import schedule_config
 from .jobs import stationary_job
 
 
-_cfg = schedule_config("stationary", default_cron="0 9 * * *")
+_cfg = schedule_config("stationary", default_cron="0 * * * *")
 stationary_schedule = None
 if _cfg.enabled:
     stationary_schedule = ScheduleDefinition(

@@ -11,6 +11,7 @@ from typing import Dict, Iterable, List, Optional
 
 from dagster import OpExecutionContext
 
+from config import schedule_local_hours
 from database.models import Unit
 from database.requests import select_report_subscriptions
 from functions.shared.report_job_runtime import (
@@ -20,10 +21,11 @@ from functions.shared.report_job_runtime import (
     publish_report_to_subscribers,
     report_job_runtime,
 )
-from functions.shared.unit_time import build_previous_local_day_window
+from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
 
 PAGE_SIZE = 500
 MAX_CONCURRENT_UNITS = 15
+TRIGGER_HOURS = set(schedule_local_hours("writeoff", (11,)))
 SLICE_REASON_LABELS = {
     "ExpiredShowcaseTime": "Списания по времени с витрины",
     "ShowcaseWriteOff": "Списания кусочков",
@@ -68,7 +70,16 @@ async def run_writeoff(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_UNITS)
     publish_lock = asyncio.Lock()
-    unit_uuids = list(snapshot.subs_by_unit.keys())
+    unit_uuids = [
+        unit_uuid
+        for unit_uuid in snapshot.subs_by_unit.keys()
+        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+    ]
+    if not unit_uuids:
+        context.log.info(
+            "writeoff_op: нет точек на локальные часы из SCHEDULE_WRITEOFF_HOURS",
+        )
+        return
 
     async with report_job_runtime(dodo_api, rabbitmq):
         async def process_unit(unit_uuid: str) -> None:
