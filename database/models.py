@@ -252,7 +252,7 @@ class Orders(Base):
     """Подписки на отчёты/уведомления по чатам и аккаунтам."""
     __tablename__ = "orders"
     __table_args__ = (
-        UniqueConstraint("post", "account_id", "chat_id", name="uq_order_id_account_id"),
+        UniqueConstraint("post", "account_id", "chat_id", "topic_id", name="uq_order_id_account_id"),
         {"schema": "aida"},
     )
 
