@@ -1,4 +1,5 @@
 dagster
+dagster-postgres
 aio-pika
 SQLAlchemy
 aiohttp
