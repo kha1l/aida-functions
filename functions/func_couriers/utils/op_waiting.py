@@ -48,7 +48,7 @@ async def _build_waiting_report(
     dodo_api,
     request: ManualCourierReportRequest,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
-    dt_start, dt_end, date_label = build_report_window(request.message_date)
+    dt_start, dt_end, date_label = build_report_window(request.message_date, request.unit_timezone)
     params_base = {
         "units": request.unit_uuid,
         "from": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),

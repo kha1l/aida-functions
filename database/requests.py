@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Optional, Tuple
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
-from database.models import Account, Token, Orders, Unit, Subscribe, Franchisee, Settings
+from database.models import Account, Token, Orders, Unit, Subscribe, Franchisee, Settings, User
 from functions.shared.i18n import normalize_language
 
 if TYPE_CHECKING:
@@ -135,6 +135,7 @@ class ReportSubscription:
     chat_id: int
     topic_id: Optional[int]
     language: str = "ru"
+    platform: str = "telegram"
     params: Optional[str] = None
     post: Optional[str] = None
 
@@ -162,10 +163,17 @@ async def select_report_subscriptions(
             )
             orders = (await session.execute(orders_stmt)).scalars().all()
             fallback_account_ids_by_chat = _extract_fallback_account_ids_by_chat(orders)
-            languages_by_chat = await _load_chat_languages_in_session(
-                session,
-                {order.chat_id for order in orders},
-                fallback_account_ids_by_chat=fallback_account_ids_by_chat,
+            chat_ids = {order.chat_id for order in orders}
+            languages_by_chat, platforms_by_chat = await asyncio.gather(
+                _load_chat_languages_in_session(
+                    session,
+                    chat_ids,
+                    fallback_account_ids_by_chat=fallback_account_ids_by_chat,
+                ),
+                _load_chat_platforms_in_session(
+                    session,
+                    chat_ids,
+                ),
             )
             for order in orders:
                 if not order.uuids:
@@ -180,6 +188,7 @@ async def select_report_subscriptions(
                             chat_id=order.chat_id,
                             topic_id=order.topic_id,
                             language=languages_by_chat.get(order.chat_id, "ru"),
+                            platform=platforms_by_chat.get(order.chat_id, "telegram"),
                             params=order.params,
                             post=post,
                         )
@@ -222,10 +231,17 @@ async def select_report_subscriptions_many(
             )
             orders = (await session.execute(orders_stmt)).scalars().all()
             fallback_account_ids_by_chat = _extract_fallback_account_ids_by_chat(orders)
-            languages_by_chat = await _load_chat_languages_in_session(
-                session,
-                {order.chat_id for order in orders},
-                fallback_account_ids_by_chat=fallback_account_ids_by_chat,
+            chat_ids = {order.chat_id for order in orders}
+            languages_by_chat, platforms_by_chat = await asyncio.gather(
+                _load_chat_languages_in_session(
+                    session,
+                    chat_ids,
+                    fallback_account_ids_by_chat=fallback_account_ids_by_chat,
+                ),
+                _load_chat_platforms_in_session(
+                    session,
+                    chat_ids,
+                ),
             )
             for order in orders:
                 if not order.uuids:
@@ -240,6 +256,7 @@ async def select_report_subscriptions_many(
                             chat_id=order.chat_id,
                             topic_id=order.topic_id,
                             language=languages_by_chat.get(order.chat_id, "ru"),
+                            platform=platforms_by_chat.get(order.chat_id, "telegram"),
                             params=order.params,
                             post=order.post,
                         )
@@ -313,6 +330,52 @@ async def load_chat_languages(
 
     return await _run_with_retry(
         operation_name="load_chat_languages",
+        context=f"chat_ids={len(chat_id_list)}",
+        action=_action,
+    )
+
+
+async def _load_chat_platforms_in_session(
+    session,
+    chat_ids: Iterable[int],
+) -> Dict[int, str]:
+    """Читает платформы чатов через latest settings -> user."""
+    chat_id_list = [chat_id for chat_id in chat_ids if chat_id]
+    if not chat_id_list:
+        return {}
+
+    stmt = (
+        select(Settings.chat_id, User.platform)
+        .join(User, User.id == Settings.user_id)
+        .where(Settings.chat_id.in_(chat_id_list))
+        .order_by(Settings.id.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+
+    result: Dict[int, str] = {}
+    for chat_id, platform in rows:
+        normalized_chat_id = int(chat_id)
+        if normalized_chat_id not in result:
+            result[normalized_chat_id] = str(platform or "telegram").strip().lower() or "telegram"
+    return result
+
+
+async def load_chat_platforms(
+    db: DatabaseResource,
+    chat_ids: Iterable[int],
+) -> Dict[int, str]:
+    """Возвращает платформы чатов по chat_id."""
+    chat_id_list = [chat_id for chat_id in chat_ids if chat_id]
+    if not chat_id_list:
+        return {}
+
+    async def _action() -> Dict[int, str]:
+        sessionmaker = db.get_sessionmaker()
+        async with sessionmaker() as session:
+            return await _load_chat_platforms_in_session(session, chat_id_list)
+
+    return await _run_with_retry(
+        operation_name="load_chat_platforms",
         context=f"chat_ids={len(chat_id_list)}",
         action=_action,
     )

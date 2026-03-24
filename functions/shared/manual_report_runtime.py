@@ -6,13 +6,13 @@ import asyncio
 import html
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 
 import aiohttp
 from dagster import OpExecutionContext
 
-from database.requests import load_accounts_and_tokens_bulk, load_chat_languages, load_units_by_uuids
+from database.requests import load_accounts_and_tokens_bulk, load_chat_languages, load_chat_platforms, load_units_by_uuids
 from functions.shared.report_text_i18n import translate_report_text
 from messaging import build_payload
 
@@ -33,6 +33,7 @@ class ManualUnitReportRequest:
     chat_id: int
     topic_id: Optional[int]
     language: str
+    platform: str
     message_date: Optional[str]
     op_config: dict[str, object]
 
@@ -79,6 +80,7 @@ async def run_manual_unit_report(
         [chat_id],
         fallback_account_ids_by_chat={int(chat_id): int(account_id)},
     )
+    chat_platforms = await load_chat_platforms(db, [chat_id])
 
     request = ManualUnitReportRequest(
         unit_uuid=unit_uuid,
@@ -89,6 +91,7 @@ async def run_manual_unit_report(
         chat_id=chat_id,
         topic_id=topic_id,
         language=chat_languages.get(chat_id, "ru"),
+        platform=chat_platforms.get(chat_id, "telegram"),
         message_date=message_date,
         op_config=dict(op_config),
     )
@@ -137,7 +140,7 @@ async def run_manual_unit_report(
                     text=text_chunk,
                     unit_uuid=request.unit_uuid,
                 )
-                await rabbitmq.publish_async(payload)
+                await rabbitmq.publish_async(payload, platform=request.platform)
         finally:
             dodo_api.reset_runtime()
             dodo_api.clear_account_token_cache()
@@ -146,25 +149,42 @@ async def run_manual_unit_report(
                 await rabbitmq_close()
 
 
-def build_report_window(message_date: Optional[str]) -> tuple[datetime, datetime, str]:
-    reference_dt = parse_reference_datetime(message_date) or datetime.now()
+def build_report_window(
+    message_date: Optional[str],
+    unit_timezone: Optional[int] = None,
+) -> tuple[datetime, datetime, str]:
+    reference_dt = parse_reference_datetime(message_date, unit_timezone=unit_timezone)
+    if reference_dt is None:
+        now_utc = datetime.now(timezone.utc)
+        if unit_timezone is not None:
+            tz = timezone(timedelta(hours=unit_timezone))
+            reference_dt = now_utc.astimezone(tz).replace(tzinfo=None)
+        else:
+            reference_dt = now_utc.replace(tzinfo=None)
     dt_end = reference_dt.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
     dt_start = dt_end - timedelta(days=1)
     return dt_start, dt_end, dt_start.strftime("%d.%m")
 
 
-def parse_reference_datetime(value: object) -> Optional[datetime]:
+def parse_reference_datetime(
+    value: object,
+    unit_timezone: Optional[int] = None,
+) -> Optional[datetime]:
     if isinstance(value, datetime):
-        return value.replace(tzinfo=None) if value.tzinfo else value
-    if not isinstance(value, str) or not value:
-        return None
-    normalized = value.replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
+        parsed = value
+    else:
+        if not isinstance(value, str) or not value:
+            return None
+        normalized = value.replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
     if parsed.tzinfo is not None:
-        return parsed.astimezone().replace(tzinfo=None)
+        if unit_timezone is not None:
+            tz = timezone(timedelta(hours=unit_timezone))
+            return parsed.astimezone(tz).replace(tzinfo=None)
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     return parsed
 
 

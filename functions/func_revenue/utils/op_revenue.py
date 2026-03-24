@@ -16,6 +16,7 @@ from config import schedule_local_hours
 from database.requests import (
     load_accounts_and_tokens_bulk,
     load_chat_languages,
+    load_chat_platforms,
     load_units_by_uuids,
     load_franchisee_group_uuids_by_unit,
     select_account_ids_for_units,
@@ -149,11 +150,11 @@ async def run_revenue(context: OpExecutionContext) -> None:
         for unit_uuid, stats in unit_stats_by_uuid.items():
             network_key = franchisee_group_by_unit.get(unit_uuid) or unit_uuid
             for sub in snapshot.subscribers_for(unit_uuid):
-                target_key = (sub.chat_id, sub.topic_id, network_key, sub.language)
+                target_key = (sub.chat_id, sub.topic_id, network_key, sub.language, sub.platform)
                 grouped_units_by_target[target_key][unit_uuid] = stats
 
         time_hint = report_time_str or datetime.utcnow().strftime("%H:%M")
-        for (chat_id, topic_id, _network_key, language), grouped_units in grouped_units_by_target.items():
+        for (chat_id, topic_id, _network_key, language, platform), grouped_units in grouped_units_by_target.items():
             if not grouped_units:
                 continue
             message = translate_report_text(
@@ -169,7 +170,7 @@ async def run_revenue(context: OpExecutionContext) -> None:
                 unit_uuid=None,
             )
             async with publish_lock:
-                await rabbitmq.publish_async(payload)
+                await rabbitmq.publish_async(payload, platform=platform)
 
 
 async def run_revenue_manual(context: OpExecutionContext) -> None:
@@ -199,7 +200,9 @@ async def run_revenue_manual(context: OpExecutionContext) -> None:
         [chat_id],
         fallback_account_ids_by_chat={chat_id: fallback_account_id} if fallback_account_id is not None else None,
     )
+    chat_platforms = await load_chat_platforms(db, [chat_id])
     report_language = chat_languages.get(chat_id, "ru")
+    report_platform = chat_platforms.get(chat_id, "telegram")
 
     async with report_job_runtime(dodo_api, rabbitmq):
         unit_stats: List[RevenueUnitStats] = []
@@ -265,7 +268,7 @@ async def run_revenue_manual(context: OpExecutionContext) -> None:
             ),
             unit_uuid=None,
         )
-        await rabbitmq.publish_async(payload)
+        await rabbitmq.publish_async(payload, platform=report_platform)
 
 
 async def _build_revenue_stats(
@@ -382,7 +385,6 @@ def _format_revenue_network_message(
     worst_decline_item = None
     worst_decline_value = None
 
-    leader_item = None
 
     for item in stats_list:
         revenue_str = _format_money(item.current_revenue)
@@ -402,8 +404,6 @@ def _format_revenue_network_message(
                 worst_decline_value = delta_value
                 worst_decline_item = item
 
-        if leader_item is None or item.current_revenue > leader_item.current_revenue:
-            leader_item = item
 
     total_delta_value = _calc_percent_change(total_current, total_previous)
 
@@ -437,10 +437,6 @@ def _format_revenue_network_message(
             f"📉 Худшее снижение: {html.escape(worst_decline_item.unit_name)} ({worst_decline_value:+d}%)"
         )
 
-    if leader_item is not None:
-        report_lines.append(
-            f"💰 Лидер по выручке: {html.escape(leader_item.unit_name)} ({_format_money(leader_item.current_revenue)})"
-        )
 
     report_lines.extend([""])
     report_lines.extend(format_row(*row) for row in rows)

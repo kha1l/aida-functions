@@ -46,7 +46,7 @@ async def _build_assembly_rest_report(
     dodo_api,
     request: ManualStationaryReportRequest,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
-    dt_start, dt_end, date_label = build_report_window(request.message_date)
+    dt_start, dt_end, date_label = build_report_window(request.message_date, request.unit_timezone)
     handover = await dodo_api.get(
         request.account_id,
         "production/orders-handover-time",

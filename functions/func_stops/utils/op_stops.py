@@ -495,7 +495,7 @@ def _format_ingredients_message(
                 ]
             )
         sections.append("\n".join(lines).strip())
-        sections.append("#стопы #игредиенты")
+        sections.append("#стопы_ингредиенты")
 
     if resumed:
         lines = [f"🟢 <b>Возобновления ингредиентов в {html.escape(unit_name)}</b>", ""]
@@ -508,7 +508,7 @@ def _format_ingredients_message(
                 ]
             )
         sections.append("\n".join(lines).strip())
-        sections.append("#стопы #игредиенты")
+        sections.append("#стопы_ингредиенты")
     return "\n\n".join(section for section in sections if section).strip() or None
 
 
@@ -538,7 +538,7 @@ def _format_key_ingredients_message(
                 "",
             ]
         )
-    lines.append("#стопы #игредиенты")
+    lines.append("#стопы_ингредиенты")
     return "\n".join(lines).strip() or None
 
 

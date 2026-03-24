@@ -183,7 +183,7 @@ async def publish_report_to_subscribers(
                 unit_uuid=unit_uuid,
             )
             async with publish_lock:
-                await rabbitmq.publish_async(payload)
+                await rabbitmq.publish_async(payload, platform=sub.platform)
 
 
 def log_auth_error(

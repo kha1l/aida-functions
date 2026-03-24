@@ -14,6 +14,7 @@ from database.requests import (
     ReportSubscription,
     load_accounts_and_tokens_bulk,
     load_chat_languages,
+    load_chat_platforms,
     load_units_by_uuids,
     select_account_ids_for_units,
     select_report_subscriptions,
@@ -191,7 +192,9 @@ async def run_stock_manual(context: OpExecutionContext) -> None:
         [chat_id],
         fallback_account_ids_by_chat={chat_id: fallback_account_id} if fallback_account_id is not None else None,
     )
+    chat_platforms = await load_chat_platforms(db, [chat_id])
     report_language = chat_languages.get(chat_id, "ru")
+    report_platform = chat_platforms.get(chat_id, "telegram")
 
     async with report_job_runtime(dodo_api, rabbitmq):
         sorted_unit_uuids = sorted(
@@ -254,7 +257,7 @@ async def run_stock_manual(context: OpExecutionContext) -> None:
                 text=translate_report_text("stock", report_language, report_text),
                 unit_uuid=unit_uuid,
             )
-            await rabbitmq.publish_async(payload)
+            await rabbitmq.publish_async(payload, platform=report_platform)
 
 
 async def _build_stock_report(

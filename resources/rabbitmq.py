@@ -12,6 +12,7 @@ from messaging import RabbitMQPublisher
     config_schema={
         "url": Field(StringSource, is_required=False),
         "queue": Field(StringSource, is_required=False),
+        "max_queue": Field(StringSource, is_required=False),
         "exchange": Field(StringSource, is_required=False),
         "routing_key": Field(StringSource, is_required=False),
         "exchange_type": Field(StringSource, is_required=False),
@@ -27,6 +28,7 @@ def rabbitmq_resource(context: InitResourceContext) -> RabbitMQPublisher:
     return RabbitMQPublisher(
         url=overrides.get("url", cfg.url),
         queue=overrides.get("queue", cfg.queue),
+        max_queue=overrides.get("max_queue", cfg.max_queue),
         exchange=overrides.get("exchange", cfg.exchange),
         routing_key=overrides.get("routing_key", cfg.routing_key),
         exchange_type=overrides.get("exchange_type", cfg.exchange_type),

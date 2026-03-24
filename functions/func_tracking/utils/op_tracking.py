@@ -13,6 +13,7 @@ from database.models import Unit
 from database.requests import (
     load_accounts_and_tokens_bulk,
     load_chat_languages,
+    load_chat_platforms,
     load_units_by_uuids,
     select_account_ids_for_units,
 )
@@ -65,7 +66,9 @@ async def run_tracking(context: OpExecutionContext) -> None:
         [chat_id],
         fallback_account_ids_by_chat={chat_id: fallback_account_id} if fallback_account_id is not None else None,
     )
+    chat_platforms = await load_chat_platforms(db, [chat_id])
     report_language = chat_languages.get(chat_id, "ru")
+    report_platform = chat_platforms.get(chat_id, "telegram")
 
     async with report_job_runtime(dodo_api, rabbitmq):
         report_blocks: List[str] = []
@@ -134,7 +137,7 @@ async def run_tracking(context: OpExecutionContext) -> None:
                 post="tracking",
                 text=text_chunk,
             )
-            await rabbitmq.publish_async(payload)
+            await rabbitmq.publish_async(payload, platform=report_platform)
 
 
 async def _build_unit_tracking_block(

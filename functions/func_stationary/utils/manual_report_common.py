@@ -61,7 +61,9 @@ def parse_dodo_datetime(value: object) -> Optional[datetime]:
         except ValueError:
             return None
     if parsed.tzinfo is not None:
-        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        # Для local-полей Dodo сохраняем локальное время как есть,
+        # а не переводим его дополнительно в UTC/таймзону сервера.
+        return parsed.replace(tzinfo=None)
     return parsed
 
 
@@ -71,13 +73,17 @@ def parse_unit_time(
     local_value: object,
     unit_timezone: Optional[int],
 ) -> Optional[datetime]:
+    parsed_local = parse_dodo_datetime(local_value)
+    if parsed_local is not None:
+        return parsed_local
+
     utc_dt = parse_dodo_datetime(utc_value)
     if utc_dt is not None and unit_timezone is not None:
         shifted = utc_dt.replace(tzinfo=timezone.utc).astimezone(
             timezone(timedelta(hours=unit_timezone))
         )
         return shifted.replace(tzinfo=None)
-    return parse_dodo_datetime(local_value)
+    return utc_dt
 
 
 def source_label(value: object) -> str:

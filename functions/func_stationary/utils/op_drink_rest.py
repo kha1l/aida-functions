@@ -42,7 +42,7 @@ async def _build_drink_rest_report(
     dodo_api,
     request: ManualStationaryReportRequest,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
-    dt_start, _dt_end, date_label = build_report_window(request.message_date)
+    dt_start, _dt_end, date_label = build_report_window(request.message_date, request.unit_timezone)
     report_date = dt_start.strftime("%Y-%m-%d")
     threshold_seconds = _request_threshold_seconds(request)
     summary = await dodo_api.get(
