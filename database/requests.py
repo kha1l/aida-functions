@@ -478,6 +478,44 @@ async def load_franchisee_group_uuids_by_unit(
     )
 
 
+async def select_active_unit_uuids(
+    db: DatabaseResource,
+) -> List[str]:
+    """Возвращает все точки, у которых есть активная связка subscribe -> token -> account.
+
+    Предполагаем, что активный доступ к точке означает:
+    - аккаунт активен;
+    - токен существует для рабочего application_id;
+    - подписка на точку не просрочена либо срок не задан.
+    """
+
+    async def _action() -> List[str]:
+        """Читает все доступные unit_uuid одним bulk-запросом."""
+        sessionmaker = db.get_sessionmaker()
+        async with sessionmaker() as session:
+            rows_stmt = (
+                select(Subscribe.uuid)
+                .join(Token, Subscribe.token_id == Token.id)
+                .join(Account, Token.account_id == Account.id)
+                .join(Unit, Subscribe.uuid == Unit.uuid)
+                .where(
+                    Token.application_id == TOKEN_APPLICATION_ID,
+                    Account.active.is_not(False),
+                    Subscribe.uuid.is_not(None),
+                    func.coalesce(Subscribe.expires, func.now()) >= func.now(),
+                )
+                .distinct()
+            )
+            rows = (await session.execute(rows_stmt)).scalars().all()
+            return [row for row in rows if row]
+
+    return await _run_with_retry(
+        operation_name="select_active_unit_uuids",
+        context="active_widget_units",
+        action=_action,
+    )
+
+
 async def select_account_ids_for_units(
     db: DatabaseResource,
     unit_uuids: Iterable[str],

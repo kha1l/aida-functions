@@ -41,6 +41,8 @@ from functions.func_tickets.schedulers import tickets_schedule
 from functions.func_tracking.jobs import tracking_job
 from functions.func_writeoff.jobs import writeoff_job
 from functions.func_writeoff.schedulers import writeoff_schedule
+from functions.func_widget.jobs import widget_job
+from functions.func_widget.schedulers import widget_schedule
 from functions.shared.definition_resources import COMMON_RESOURCE_DEFS
 
 
@@ -72,6 +74,7 @@ _jobs = [
     tickets_job,
     tracking_job,
     writeoff_job,
+    widget_job,
 ]
 
 # В расписания попадают только регулярные job.
@@ -89,6 +92,7 @@ _schedules = [
     stock_schedule,
     stops_schedule,
     tickets_schedule,
+    widget_schedule,
     writeoff_schedule,
 ]
 

@@ -229,6 +229,46 @@ def ratings_api_settings() -> RatingsApiSettings:
 
 
 # -------------------
+# Store API widget
+# -------------------
+
+@dataclass(frozen=True)
+class StoreWidgetSettings:
+    """Настройки выгрузки данных в Dodo Store API для старого widget."""
+
+    token_url: str
+    storage_url: str
+    client_id: Optional[str]
+    client_secret: Optional[str]
+    scope: str
+    model_id: Optional[str]
+    timeout_seconds: int
+    retries: int
+    upload_chunk_size: int
+
+
+def store_widget_settings() -> StoreWidgetSettings:
+    """Собирает настройки выгрузки widget-данных из env.
+
+    Поддерживаем как новые явные ключи `STORE_WIDGET_*`, так и старые
+    имена из legacy-проекта `widget` (`CLIENT`, `SECRET`, `SCOPE`, `MODEL`).
+    """
+    return StoreWidgetSettings(
+        token_url=_env("STORE_WIDGET_TOKEN_URL", "https://auth.dodois.io/connect/token")
+        or "https://auth.dodois.io/connect/token",
+        storage_url=_env("STORE_WIDGET_STORAGE_URL", "https://api.dodois.io/store-api/storage")
+        or "https://api.dodois.io/store-api/storage",
+        client_id=_env("STORE_WIDGET_CLIENT_ID") or _env("CLIENT"),
+        client_secret=_env("STORE_WIDGET_CLIENT_SECRET") or _env("SECRET"),
+        scope=_env("STORE_WIDGET_SCOPE", _env("SCOPE", "storeapi:write")) or "storeapi:write",
+        model_id=_env("STORE_WIDGET_MODEL_ID") or _env("MODEL"),
+        timeout_seconds=_env_int("STORE_WIDGET_TIMEOUT_SECONDS", 30),
+        retries=_env_int("STORE_WIDGET_RETRIES", 5),
+        upload_chunk_size=_env_int("STORE_WIDGET_UPLOAD_CHUNK_SIZE", 100),
+    )
+
+
+# -------------------
 # OpenRouter
 # -------------------
 
