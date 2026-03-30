@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -24,11 +25,18 @@ from functions.shared.report_job_runtime import (
 from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
 
 PAGE_SIZE = 500
+STOCK_ITEMS_BATCH_SIZE = 100
 MAX_CONCURRENT_UNITS = 15
 TRIGGER_HOURS = set(schedule_local_hours("writeoff", (11,)))
 SLICE_REASON_LABELS = {
     "ExpiredShowcaseTime": "Списания по времени с витрины",
     "ShowcaseWriteOff": "Списания кусочков",
+}
+MEASUREMENT_UNITS = {
+    "Quantity": "шт.",
+    "Kilogram": "кг",
+    "Liter": "л",
+    "Meter": "м",
 }
 
 
@@ -40,6 +48,7 @@ class WriteOffEntry:
     reason: str
     amount: Decimal
     quantity: Decimal
+    quantity_unit: str = "шт."
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +59,17 @@ class WeeklyFrequentWriteOff:
     amount: Decimal
     count: int
     quantity: Decimal
+    quantity_unit: str
+
+
+@dataclass(frozen=True, slots=True)
+class IngredientCost:
+    """Стоимость единицы списываемого ингредиента и его метаданные."""
+
+    stock_item_id: str
+    name: str
+    unit_cost: Decimal
+    quantity_unit: str
 
 
 async def run_writeoff(context: OpExecutionContext) -> None:
@@ -170,35 +190,90 @@ async def _build_writeoff_report(
         account_id=account_id,
         params_base=day_params,
     )
-    day_writeoffs_task = _fetch_writeoffs(
+    day_products_task = _fetch_product_writeoff_rows(
         dodo_api=dodo_api,
         account_id=account_id,
         params_base=day_params,
     )
-    week_writeoffs_task = _fetch_writeoffs(
+    day_stock_items_task = _fetch_stock_item_writeoff_rows(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        params_base=day_params,
+    )
+    week_products_task = _fetch_product_writeoff_rows(
         dodo_api=dodo_api,
         account_id=account_id,
         params_base=week_params,
     )
-    revenue_result, day_writeoffs_result, week_writeoffs_result = await asyncio.gather(
+    week_stock_items_task = _fetch_stock_item_writeoff_rows(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        params_base=week_params,
+    )
+    (
+        revenue_result,
+        day_products_result,
+        day_stock_items_result,
+        week_products_result,
+        week_stock_items_result,
+    ) = await asyncio.gather(
         revenue_task,
-        day_writeoffs_task,
-        week_writeoffs_task,
+        day_products_task,
+        day_stock_items_task,
+        week_products_task,
+        week_stock_items_task,
     )
 
     if revenue_result[0] is None:
         return None, revenue_result[1], revenue_result[2]
-    if day_writeoffs_result[0] is None:
-        return None, day_writeoffs_result[1], day_writeoffs_result[2]
-    if week_writeoffs_result[0] is None:
-        return None, week_writeoffs_result[1], week_writeoffs_result[2]
+    if day_products_result[0] is None:
+        return None, day_products_result[1], day_products_result[2]
+    if day_stock_items_result[0] is None:
+        return None, day_stock_items_result[1], day_stock_items_result[2]
+    if week_products_result[0] is None:
+        return None, week_products_result[1], week_products_result[2]
+    if week_stock_items_result[0] is None:
+        return None, week_stock_items_result[1], week_stock_items_result[2]
+
+    stock_item_ids = _collect_stock_item_ids(
+        day_product_rows=day_products_result[0],
+        day_stock_item_rows=day_stock_items_result[0],
+        week_product_rows=week_products_result[0],
+        week_stock_item_rows=week_stock_items_result[0],
+    )
+    ingredient_costs_result = await _fetch_ingredient_costs(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        stock_item_ids=stock_item_ids,
+    )
+    if ingredient_costs_result[0] is None:
+        return None, ingredient_costs_result[1], ingredient_costs_result[2]
+
+    ingredient_costs = ingredient_costs_result[0]
+    day_entries = _build_writeoff_entries(
+        product_rows=day_products_result[0],
+        stock_item_rows=day_stock_items_result[0],
+        ingredient_costs=ingredient_costs,
+    )
+    week_entries = _build_writeoff_entries(
+        product_rows=week_products_result[0],
+        stock_item_rows=week_stock_items_result[0],
+        ingredient_costs=ingredient_costs,
+    )
+    reason_totals = _build_reason_totals(
+        product_rows=day_products_result[0],
+        stock_item_rows=day_stock_items_result[0],
+        ingredient_costs=ingredient_costs,
+    )
 
     return _format_writeoff_message(
         unit_name=unit_name,
         date_label=date_label,
         revenue_total=revenue_result[0],
-        day_writeoffs=day_writeoffs_result[0],
-        weekly_frequent=_find_weekly_frequent_writeoff(week_writeoffs_result[0]),
+        day_writeoffs=day_entries,
+        reason_totals=reason_totals,
+        weekly_frequent=_find_weekly_frequent_writeoff(week_entries),
     ), None, 200
 
 
@@ -257,24 +332,51 @@ async def _fetch_revenue_total(
     return revenue_total, None, 200
 
 
-async def _fetch_writeoffs(
+async def _fetch_product_writeoff_rows(
     *,
     dodo_api,
     account_id: int,
     params_base: Dict[str, str],
-) -> tuple[Optional[List[WriteOffEntry]], Optional[str], Optional[int]]:
+) -> tuple[Optional[List[dict]], Optional[str], Optional[int]]:
     """Загружает все списанные продукты за период."""
+    return await _fetch_writeoff_rows(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        path="accounting/write-offs/products",
+        params_base=params_base,
+    )
+
+
+async def _fetch_stock_item_writeoff_rows(
+    *,
+    dodo_api,
+    account_id: int,
+    params_base: Dict[str, str],
+) -> tuple[Optional[List[dict]], Optional[str], Optional[int]]:
+    """Загружает все списанные отдельно ингредиенты за период."""
+    return await _fetch_writeoff_rows(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        path="accounting/write-offs/stock-items",
+        params_base=params_base,
+    )
+
+
+async def _fetch_writeoff_rows(
+    *,
+    dodo_api,
+    account_id: int,
+    path: str,
+    params_base: Dict[str, str],
+) -> tuple[Optional[List[dict]], Optional[str], Optional[int]]:
+    """Универсально загружает строки списаний из write-offs endpoints."""
     skip = 0
-    rows_result: List[WriteOffEntry] = []
+    rows_result: List[dict] = []
 
     while True:
         params = dict(params_base)
         params.update({"skip": skip, "take": PAGE_SIZE})
-        response = await dodo_api.get(
-            account_id,
-            "accounting/write-offs/products",
-            params=params,
-        )
+        response = await dodo_api.get(account_id, path, params=params)
         if not response.ok:
             return None, response.error_html, response.status
 
@@ -284,19 +386,8 @@ async def _fetch_writeoffs(
             rows = []
 
         for row in rows:
-            if not isinstance(row, dict):
-                continue
-            rows_result.append(
-                WriteOffEntry(
-                    # `productName` уже приходит из API в человекочитаемом виде
-                    # и часто содержит фасовку (`1 шт`, `0,2 л`), поэтому ниже
-                    # мы больше не пытаемся вручную собирать название.
-                    product_name=str(row.get("productName") or "Неизвестный продукт").strip(),
-                    reason=str(row.get("reason") or "Unknown").strip() or "Unknown",
-                    amount=_to_decimal(row.get("pricePerPiece")) * _to_decimal(row.get("quantity")),
-                    quantity=_to_decimal(row.get("quantity")),
-                )
-            )
+            if isinstance(row, dict):
+                rows_result.append(row)
 
         if data.get("isEndOfListReached"):
             break
@@ -305,27 +396,223 @@ async def _fetch_writeoffs(
     return rows_result, None, 200
 
 
+async def _fetch_ingredient_costs(
+    *,
+    dodo_api,
+    account_id: int,
+    unit_uuid: str,
+    stock_item_ids: List[str],
+) -> tuple[Optional[Dict[str, IngredientCost]], Optional[str], Optional[int]]:
+    """Загружает складские остатки только по нужным ингредиентам и считает цену единицы."""
+    if not stock_item_ids:
+        return {}, None, 200
+
+    result: Dict[str, IngredientCost] = {}
+    for chunk in _chunked(stock_item_ids, STOCK_ITEMS_BATCH_SIZE):
+        skip = 0
+        while True:
+            params = {
+                "units": unit_uuid,
+                "categories": "Ingredient",
+                "stockItems": ",".join(chunk),
+                "skip": skip,
+                "take": PAGE_SIZE,
+            }
+            response = await dodo_api.get(
+                account_id,
+                "accounting/inventory-stocks",
+                params=params,
+            )
+            if not response.ok:
+                return None, response.error_html, response.status
+
+            data = response.data if isinstance(response.data, dict) else {}
+            rows = data.get("stocks")
+            if not isinstance(rows, list):
+                rows = []
+
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                stock_item_id = _extract_stock_item_id(row)
+                if not stock_item_id:
+                    continue
+                quantity = _to_decimal(row.get("quantity"))
+                balance_in_money = _to_decimal(row.get("balanceInMoney"))
+                unit_cost = (
+                    balance_in_money / quantity
+                    if quantity > 0
+                    else Decimal("0")
+                )
+                result[stock_item_id] = IngredientCost(
+                    stock_item_id=stock_item_id,
+                    name=str(row.get("name") or row.get("stockItemName") or stock_item_id).strip() or stock_item_id,
+                    unit_cost=unit_cost,
+                    quantity_unit=_measurement_unit_suffix(row.get("measurementUnit")),
+                )
+
+            if data.get("isEndOfListReached"):
+                break
+            skip += PAGE_SIZE
+
+    return result, None, 200
+
+
+def _collect_stock_item_ids(
+    *,
+    day_product_rows: List[dict],
+    day_stock_item_rows: List[dict],
+    week_product_rows: List[dict],
+    week_stock_item_rows: List[dict],
+) -> List[str]:
+    """Собирает уникальный список ингредиентов из всех списаний за день и неделю."""
+    ids: set[str] = set()
+    for rows in (day_product_rows, week_product_rows):
+        for row in rows:
+            for stock_item in row.get("stockItems") or []:
+                if not isinstance(stock_item, dict):
+                    continue
+                stock_item_id = _extract_stock_item_id(stock_item)
+                if stock_item_id:
+                    ids.add(stock_item_id)
+
+    for rows in (day_stock_item_rows, week_stock_item_rows):
+        for row in rows:
+            stock_item_id = _extract_stock_item_id(row)
+            if stock_item_id:
+                ids.add(stock_item_id)
+
+    return sorted(ids)
+
+
+def _build_writeoff_entries(
+    *,
+    product_rows: List[dict],
+    stock_item_rows: List[dict],
+    ingredient_costs: Dict[str, IngredientCost],
+) -> List[WriteOffEntry]:
+    """Преобразует сырые списания продуктов и ингредиентов в единый список событий."""
+    entries: List[WriteOffEntry] = []
+
+    for row in product_rows:
+        quantity = _to_decimal(row.get("quantity"))
+        amount = _product_row_amount(row, ingredient_costs)
+        entries.append(
+            WriteOffEntry(
+                product_name=str(row.get("productName") or "Неизвестный продукт").strip(),
+                reason=str(row.get("reason") or "Unknown").strip() or "Unknown",
+                amount=amount,
+                quantity=quantity,
+                quantity_unit="шт.",
+            )
+        )
+
+    for row in stock_item_rows:
+        stock_item_id = _extract_stock_item_id(row)
+        cost_info = ingredient_costs.get(stock_item_id or "")
+        quantity = _to_decimal(row.get("quantity"))
+        product_name = str(
+            row.get("stockItemName")
+            or (cost_info.name if cost_info else "")
+            or "Неизвестный ингредиент"
+        ).strip()
+        entries.append(
+            WriteOffEntry(
+                product_name=product_name,
+                reason=str(row.get("reason") or "Unknown").strip() or "Unknown",
+                amount=quantity * (cost_info.unit_cost if cost_info else Decimal("0")),
+                quantity=quantity,
+                quantity_unit=_measurement_unit_suffix(row.get("measurementUnit")) or (cost_info.quantity_unit if cost_info else ""),
+            )
+        )
+
+    return entries
+
+
+def _build_reason_totals(
+    *,
+    product_rows: List[dict],
+    stock_item_rows: List[dict],
+    ingredient_costs: Dict[str, IngredientCost],
+) -> Dict[str, Decimal]:
+    """Суммирует стоимость списаний по причинам через общие количества ингредиентов."""
+    totals_by_reason_and_item: Dict[str, Dict[str, Decimal]] = defaultdict(dict)
+
+    for row in product_rows:
+        reason = str(row.get("reason") or "Unknown").strip() or "Unknown"
+        row_quantity = _to_decimal(row.get("quantity"))
+        for stock_item in row.get("stockItems") or []:
+            if not isinstance(stock_item, dict):
+                continue
+            stock_item_id = _extract_stock_item_id(stock_item)
+            if not stock_item_id:
+                continue
+            ingredient_quantity = _to_decimal(stock_item.get("quantity")) * row_quantity
+            reason_bucket = totals_by_reason_and_item[reason]
+            reason_bucket[stock_item_id] = reason_bucket.get(stock_item_id, Decimal("0")) + ingredient_quantity
+
+    for row in stock_item_rows:
+        reason = str(row.get("reason") or "Unknown").strip() or "Unknown"
+        stock_item_id = _extract_stock_item_id(row)
+        if not stock_item_id:
+            continue
+        ingredient_quantity = _to_decimal(row.get("quantity"))
+        reason_bucket = totals_by_reason_and_item[reason]
+        reason_bucket[stock_item_id] = reason_bucket.get(stock_item_id, Decimal("0")) + ingredient_quantity
+
+    totals: Dict[str, Decimal] = {}
+    for reason, items in totals_by_reason_and_item.items():
+        amount = Decimal("0")
+        for stock_item_id, quantity in items.items():
+            cost_info = ingredient_costs.get(stock_item_id)
+            if cost_info is None:
+                continue
+            amount += quantity * cost_info.unit_cost
+        totals[reason] = amount
+    return totals
+
+
+def _product_row_amount(
+    row: dict,
+    ingredient_costs: Dict[str, IngredientCost],
+) -> Decimal:
+    """Считает стоимость списанного продукта через ингредиенты в его составе."""
+    row_quantity = _to_decimal(row.get("quantity"))
+    amount = Decimal("0")
+    for stock_item in row.get("stockItems") or []:
+        if not isinstance(stock_item, dict):
+            continue
+        stock_item_id = _extract_stock_item_id(stock_item)
+        if not stock_item_id:
+            continue
+        cost_info = ingredient_costs.get(stock_item_id)
+        if cost_info is None:
+            continue
+        amount += _to_decimal(stock_item.get("quantity")) * row_quantity * cost_info.unit_cost
+    return amount
+
+
 def _format_writeoff_message(
     *,
     unit_name: str,
     date_label: str,
     revenue_total: Decimal,
     day_writeoffs: List[WriteOffEntry],
+    reason_totals: Dict[str, Decimal],
     weekly_frequent: Optional[WeeklyFrequentWriteOff],
 ) -> str:
     """Формирует итоговый daily-отчет по списаниям."""
-    reasons_totals = _aggregate_reason_totals(day_writeoffs)
     most_expensive = _find_most_expensive_writeoff(day_writeoffs)
 
     lines = [
-        f"🗑 <b>Списания продуктов за {date_label} в заведении {html.escape(unit_name)}</b>",
-        f"Выручка: {int(revenue_total)}",
+        f"🗑 <b>Списания продуктов и сырья за {date_label} в заведении {html.escape(unit_name)}</b>",
+        f"Выручка: {_format_money(revenue_total)}",
         "",
     ]
 
-    if reasons_totals:
+    if reason_totals:
         lines.append("<b>По причинам списания:</b>")
-        lines.extend(_format_reason_lines(reasons_totals, revenue_total))
+        lines.extend(_format_reason_lines(reason_totals, revenue_total))
     else:
         lines.append("<b>По причинам списания:</b>")
         lines.append("Списаний за день не найдено.")
@@ -334,8 +621,10 @@ def _format_writeoff_message(
     if most_expensive is not None:
         lines.append("<b>Самое дорогое списание:</b>")
         lines.append(f"{html.escape(most_expensive.product_name.strip())}:")
-        lines.append(f"        Количество: {_format_quantity(most_expensive.quantity)} шт.")
-        lines.append(f"        Стоимость: {int(most_expensive.amount)}")
+        lines.append(
+            f"        Количество: {_format_quantity_line(most_expensive.quantity, most_expensive.quantity_unit, default_unit='шт.')}"
+        )
+        lines.append(f"        Стоимость: {_format_money(most_expensive.amount)}")
         lines.append(
             f"        % от выручки: {_format_percent(_share_percent(most_expensive.amount, revenue_total))}%"
         )
@@ -347,8 +636,10 @@ def _format_writeoff_message(
     if weekly_frequent is not None:
         lines.append("<b>Самое частое списание за 7 дней:</b>")
         lines.append(f"{html.escape(weekly_frequent.product_name.strip())}:")
-        lines.append(f"        Стоимость: {int(weekly_frequent.amount)}")
-        lines.append(f"        Количество: {_format_quantity(weekly_frequent.quantity)} шт.")
+        lines.append(f"        Стоимость: {_format_money(weekly_frequent.amount)}")
+        lines.append(
+            f"        Количество: {_format_quantity_line(weekly_frequent.quantity, weekly_frequent.quantity_unit, default_unit='шт.')}"
+        )
         lines.append(f"        Списаний: {weekly_frequent.count}")
     else:
         lines.append("<b>Самое частое списание за 7 дней:</b>")
@@ -367,7 +658,7 @@ def _format_reason_lines(
     rows = [
         (
             _label_reason(reason),
-            str(int(amount)),
+            _format_money(amount),
             f"({_format_percent(_share_percent(amount, revenue_total))}%)",
         )
         for reason, amount in sorted(reasons_totals.items(), key=lambda item: item[1], reverse=True)
@@ -385,13 +676,9 @@ def _format_reason_lines(
     return formatted
 
 
-def _aggregate_reason_totals(rows: Iterable[WriteOffEntry]) -> Dict[str, Decimal]:
-    """Суммирует стоимость списаний по причине."""
-    totals: Dict[str, Decimal] = {}
-    for row in rows:
-        totals[row.reason] = totals.get(row.reason, Decimal("0")) + row.amount
-    return totals
-
+def _format_money(value: Decimal) -> str:
+    """Форматирует денежные суммы с разделителями тысяч."""
+    return f"{int(value):,}".replace(",", " ")
 
 def _find_most_expensive_writeoff(rows: Iterable[WriteOffEntry]) -> Optional[WriteOffEntry]:
     """Находит самое дорогое разовое списание."""
@@ -409,6 +696,7 @@ def _find_weekly_frequent_writeoff(rows: Iterable[WriteOffEntry]) -> Optional[We
                 amount=row.amount,
                 count=1,
                 quantity=row.quantity,
+                quantity_unit=row.quantity_unit,
             )
             continue
         aggregated[row.product_name] = WeeklyFrequentWriteOff(
@@ -418,6 +706,7 @@ def _find_weekly_frequent_writeoff(rows: Iterable[WriteOffEntry]) -> Optional[We
             # Показываем не только число событий, но и общий объем списанного
             # товара за 7 дней.
             quantity=current.quantity + row.quantity,
+            quantity_unit=current.quantity_unit,
         )
 
     if not aggregated:
@@ -464,6 +753,35 @@ def _format_quantity(quantity: Decimal) -> str:
     if quantity == quantity.to_integral_value():
         return str(int(quantity))
     return f"{float(quantity):g}"
+
+
+def _format_quantity_line(
+    quantity: Decimal,
+    quantity_unit: str | None = None,
+    *,
+    default_unit: str = "",
+) -> str:
+    """Собирает строку количества с опциональной единицей измерения."""
+    suffix = (quantity_unit or default_unit or "").strip()
+    if suffix:
+        return f"{_format_quantity(quantity)} {suffix}"
+    return _format_quantity(quantity)
+
+
+def _extract_stock_item_id(row: dict) -> str:
+    """Достает идентификатор ингредиента из разных форм API."""
+    return str(row.get("stockItemId") or row.get("id") or "").strip()
+
+
+def _measurement_unit_suffix(value: object) -> str:
+    """Преобразует код единицы измерения в человекочитаемый суффикс."""
+    return MEASUREMENT_UNITS.get(str(value or "").strip(), "")
+
+
+def _chunked(values: List[str], chunk_size: int) -> Iterable[List[str]]:
+    """Разбивает список значений на небольшие чанки для query-параметров."""
+    for index in range(0, len(values), chunk_size):
+        yield values[index:index + chunk_size]
 
 
 def _to_decimal(value: object) -> Decimal:

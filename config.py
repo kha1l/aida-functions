@@ -198,6 +198,37 @@ def dodo_api_settings() -> DodoApiSettings:
 
 
 # -------------------
+# Ratings API
+# -------------------
+
+@dataclass(frozen=True)
+class RatingsApiSettings:
+    """Настройки эндпоинтов рейтингов control API."""
+
+    standards_url: str
+    customer_experience_url: str
+    recent_hours: int
+
+
+def ratings_api_settings() -> RatingsApiSettings:
+    """Собирает настройки control-рейтингов из env."""
+    return RatingsApiSettings(
+        standards_url=(
+            _env("CONTROL_STANDARD_RATINGS_URL", "https://api.dodois.io/controlling/ratings/standards")
+            or "https://api.dodois.io/controlling/ratings/standards"
+        ),
+        customer_experience_url=(
+            _env(
+                "CONTROL_CUSTOMER_EXPERIENCE_RATINGS_URL",
+                "https://api.dodois.io/controlling/ratings/customer-experience",
+            )
+            or "https://api.dodois.io/controlling/ratings/customer-experience"
+        ),
+        recent_hours=_env_int("RATINGS_RECENT_HOURS", 24),
+    )
+
+
+# -------------------
 # OpenRouter
 # -------------------
 

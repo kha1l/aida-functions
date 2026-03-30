@@ -17,6 +17,8 @@ from functions.func_defect.jobs import defect_job
 from functions.func_defect.schedulers import defect_schedule
 from functions.func_metrics.jobs import metrics_job, metrics_manual_job
 from functions.func_metrics.schedulers import metrics_schedule
+from functions.func_ratings.jobs import ratings_job
+from functions.func_ratings.schedulers import ratings_schedule
 from functions.func_refusal.jobs import refusal_job
 from functions.func_refusal.schedulers import refusal_schedule
 from functions.func_revenue.jobs import revenue_job, revenue_manual_job
@@ -55,6 +57,7 @@ _jobs = [
     defect_job,
     metrics_job,
     metrics_manual_job,
+    ratings_job,
     refusal_job,
     revenue_job,
     revenue_manual_job,
@@ -78,6 +81,7 @@ _schedules = [
     couriers_schedule,
     defect_schedule,
     metrics_schedule,
+    ratings_schedule,
     refusal_schedule,
     revenue_schedule,
     staff_schedule,

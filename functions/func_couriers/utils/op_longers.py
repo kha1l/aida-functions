@@ -27,6 +27,7 @@ class LongerDeliveryEntry:
     courier_name: str
     total_time_seconds: int
     delivery_time_seconds: int
+    heated_shelf_time_seconds: int
     trip_orders_count: int
     is_false_delivery: bool
     sector_name: str
@@ -190,6 +191,7 @@ async def _collect_longer_delivery_entries(
                 courier_name=courier_name,
                 total_time_seconds=total_time_seconds,
                 delivery_time_seconds=delivery_time,
+                heated_shelf_time_seconds=heated_shelf_time,
                 trip_orders_count=to_int(courier_order.get("tripOrdersCount")) or 0,
                 is_false_delivery=bool(courier_order.get("isFalseDelivery")),
                 sector_name=_normalize_sector_name(courier_order.get("sectorName")),
@@ -228,6 +230,7 @@ def _format_longers_message(
                 f"Курьер: {entry.courier_name}",
                 f"Общее время доставки: {timedelta(seconds=entry.total_time_seconds)}",
                 f"Фактическое время доставки: {timedelta(seconds=entry.delivery_time_seconds)}",
+                f"Время ожидания доставки: {timedelta(seconds=entry.heated_shelf_time_seconds)}",
                 f"Заказов в поездке: {entry.trip_orders_count}",
                 f"Некорректная доставка: {false_delivery_text}",
                 f"Сектор: {entry.sector_name}",
