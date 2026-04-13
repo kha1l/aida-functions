@@ -17,6 +17,7 @@ MANUAL_UNIT_REPORT_CONFIG = {
     "chat_id": Field(int),
     "topic_id": Field(int, is_required=False),
     "message_date": Field(str, is_required=False),
+    "result_request_id": Field(str, is_required=False),
 }
 
 MANUAL_WAITING_REPORT_CONFIG = {
@@ -54,7 +55,7 @@ def later_op(context: OpExecutionContext):
     config_schema=MANUAL_WAITING_REPORT_CONFIG,
 )
 def waiting_op(context: OpExecutionContext):
-    """Собирает отчет по ожиданиям курьеров и отправляет в RabbitMQ."""
+    """Собирает отчет по ожиданиям курьеров для RabbitMQ или WebApp."""
     asyncio.run(run_waiting(context))
 
 

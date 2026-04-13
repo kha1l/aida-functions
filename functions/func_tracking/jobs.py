@@ -5,7 +5,7 @@ from dagster import job
 from .ops import tracking_op
 
 
-@job
+@job(description="Ручной сводный отчет по трекингу выбранных заведений.")
 def tracking_job():
     """Запускает manual job по сводному трекингу."""
     tracking_op()

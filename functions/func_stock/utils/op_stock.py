@@ -334,7 +334,7 @@ def _format_stock_message(
 ) -> str:
     """Формирует текст отчета по проблемным складским остаткам."""
     lines = [
-        f"\U0001F9C0 Складские остатки на {local_now.strftime('%d.%m %H:%M:%S')}",
+        f"\U0001F9C0  Складские остатки на {local_now.strftime('%d.%m %H:%M:%S')}",
         "",
         f"<b>{unit_name}</b>",
     ]
@@ -353,8 +353,8 @@ def _format_stock_message(
 
     if any(grouped_issues.values()):
         sections = [
-            ("⚠️ Некорректные остатки", grouped_issues["invalid"]),
-            ("‼️ Хватит менее чем на день", grouped_issues["less_than_day"]),
+            ("⚠️  Некорректные остатки", grouped_issues["invalid"]),
+            ("‼️  Хватит менее чем на день", grouped_issues["less_than_day"]),
             ("❕ Хватит на 2 дня", grouped_issues["two_days"]),
             ("❔ Подозрительные данные Dodo IS", grouped_issues["suspicious"]),
         ]
@@ -362,7 +362,7 @@ def _format_stock_message(
             if not items:
                 continue
             lines.append("")
-            lines.append(f"<b>{title}:</b>")
+            lines.append(f"{title}:")
             lines.extend(items)
     else:
         lines.append("    \u2705 Критичных позиций не найдено")
@@ -391,17 +391,17 @@ def _build_stock_issue(item: dict) -> tuple[str, str] | None:
 
     if days_until_runs_out == 0:
         if quantity < 0:
-            return "invalid", f"    ⚠️ {name} осталось {quantity_text}{unit_suffix} - некорректный остаток"
+            return "invalid", f"    {name} осталось {quantity_text}{unit_suffix} - некорректный остаток"
         if avg_weekday_expense < 0 or avg_weekend_expense < 0:
-            return "suspicious", f"    ❔ {name} осталось {quantity_text}{unit_suffix} - расход по dodois меньше нуля"
+            return "suspicious", f"    {name} осталось {quantity_text}{unit_suffix} - расход по dodois меньше нуля"
         if quantity <= avg_weekday_expense:
-            return "less_than_day", f"    ‼️ {name} осталось {quantity_text}{unit_suffix} - хватит менее чем на день"
+            return "less_than_day", f"    {name} осталось {quantity_text}{unit_suffix} - хватит менее чем на день"
         return None
 
     if days_until_runs_out == 1:
-        return "less_than_day", f"    ‼️ {name} осталось {quantity_text}{unit_suffix} - хватит менее чем на день"
+        return "less_than_day", f"    {name} осталось {quantity_text}{unit_suffix} - хватит менее чем на день"
 
-    return "two_days", f"    ❕ {name} осталось {quantity_text}{unit_suffix} - хватит на {days_until_runs_out} дня"
+    return "two_days", f"    {name} осталось {quantity_text}{unit_suffix} - хватит на {days_until_runs_out} дня"
 
 
 def _normalize_params_key(value: Optional[str]) -> str:

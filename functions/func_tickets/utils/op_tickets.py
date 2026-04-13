@@ -465,9 +465,7 @@ def _format_tickets_message(
             f"Канал обращения: {html.escape(ticket.channel_name or 'Не указан')}"
         )
         if ticket.order_type == "Доставка":
-            lines.append(
-                f"Курьер: {html.escape(ticket.courier_name or 'Не удалось определить')}"
-            )
+            lines.append(f"Курьер: {_format_courier_name(ticket.courier_name)}")
         lines.append(f"Комментарий: {html.escape(ticket.comment)}")
         lines.append(
             f"Дата и время заказа: {html.escape(_format_order_datetime(ticket.order_date, ticket.order_time))}"
@@ -478,6 +476,15 @@ def _format_tickets_message(
         lines.append("")
     lines.append("#тикеты")
     return "\n".join(lines).strip()
+
+
+def _format_courier_name(value: Optional[str]) -> str:
+    """Экранирует ФИО курьера и выделяет его жирным, если оно найдено."""
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned:
+            return f"<b>{html.escape(cleaned)}</b>"
+    return html.escape("Не удалось определить")
 
 
 def _build_utc_window(now_utc: Optional[datetime] = None) -> tuple[datetime, datetime]:

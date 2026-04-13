@@ -19,6 +19,10 @@ from .manual_report_common import (
 )
 
 
+DRINKIT_CONCEPT = "drinkit"
+DRINKIT_LONG_ORDER_THRESHOLD_SECONDS = 6 * 60
+
+
 @dataclass(frozen=True, slots=True)
 class LaterRestEntry:
     """Одна запись о долгом заказе ресторана."""
@@ -90,10 +94,11 @@ def _collect_later_rest_entries(
         tracking_seconds = to_int(order.get("trackingPendingTime")) or 0
         cooking_seconds = to_int(order.get("cookingTime")) or 0
         total_seconds = tracking_seconds + cooking_seconds
-        if total_seconds <= _long_order_threshold_seconds(
+        long_order_threshold_seconds = _long_order_threshold_seconds(
             concept=concept,
             order_number=order.get("orderNumber"),
-        ):
+        )
+        if total_seconds <= long_order_threshold_seconds:
             continue
 
         entries.append(
@@ -126,8 +131,8 @@ def _format_later_rest_message(
         f"\u23F1 <b>Долгие заказы за {date_label} в заведении {unit_name}</b>",
     ]
 
-    if concept == "drinkit":
-        lines.append("Для Drinkit: идеальные < 3 мин, нормальные 3-6 мин, опоздания > 6 мин.")
+    if concept == DRINKIT_CONCEPT:
+        lines.append("Для Drinkit показываем только заказы с общим временем > 6 минут.")
 
     lines.append("")
 
@@ -152,8 +157,8 @@ def _format_later_rest_message(
 
 
 def _long_order_threshold_seconds(*, concept: str, order_number: object) -> int:
-    if concept == "drinkit":
-        return 6 * 60
+    if concept == DRINKIT_CONCEPT:
+        return DRINKIT_LONG_ORDER_THRESHOLD_SECONDS
 
     parts_count = _extract_order_parts_count(order_number)
     if parts_count <= 0:

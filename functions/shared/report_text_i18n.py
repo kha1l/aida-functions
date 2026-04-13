@@ -92,7 +92,12 @@ _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("#выручкаПоСети", "#networkRevenue"),
     ),
     "stock": (
+        ("🧀  Складские остатки на ", "🧀  Stock balances at "),
         ("🧀 Складские остатки на ", "🧀 Stock balances at "),
+        ("⚠️  Некорректные остатки:", "⚠️  Invalid balances:"),
+        ("‼️  Хватит менее чем на день:", "‼️  Enough for less than a day:"),
+        ("❕ Хватит на 2 дня:", "❕ Enough for 2 days:"),
+        ("❔ Подозрительные данные Dodo IS:", "❔ Suspicious Dodo IS data:"),
         ("✅ Критичных позиций не найдено", "✅ No critical stock items found"),
         (" осталось ", " left "),
         (" - некорректный остаток", " - invalid balance"),
@@ -233,6 +238,10 @@ _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "later_rest": (
         ("⏱ <b>Долгие заказы за ", "⏱ <b>Long orders for "),
         (" в заведении ", " at "),
+        (
+            "Для Drinkit показываем только заказы с общим временем > 6 минут.",
+            "For Drinkit, only orders with total time > 6 minutes are shown.",
+        ),
         ("Долгих заказов не найдено. Отличная работа, так держать!", "No long orders found. Great job, keep it up!"),
         ("Время на трекинге: ", "Tracking time: "),
         ("Время приготовления: ", "Cooking time: "),

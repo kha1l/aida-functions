@@ -15,6 +15,7 @@ MANUAL_STATIONARY_REPORT_CONFIG = {
     "chat_id": Field(int),
     "topic_id": Field(int, is_required=False),
     "message_date": Field(str, is_required=False),
+    "result_request_id": Field(str, is_required=False),
 }
 
 MANUAL_STATIONARY_DRINK_REPORT_CONFIG = {

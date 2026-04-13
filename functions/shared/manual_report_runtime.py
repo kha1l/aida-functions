@@ -7,18 +7,28 @@ import html
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import aiohttp
 from dagster import OpExecutionContext
 
 from database.requests import load_accounts_and_tokens_bulk, load_chat_languages, load_chat_platforms, load_units_by_uuids
 from functions.shared.report_text_i18n import translate_report_text
+from functions.shared.webapp_results import store_webapp_report_result
 from messaging import build_payload
 
 
 TELEGRAM_MESSAGE_LIMIT = 4096
 SAFE_TELEGRAM_CHUNK = 4000
+REPORT_TITLES = {
+    "certificates": "Сертификаты",
+    "later": "Опоздания/прогулы",
+    "sectors": "Сектора доставки",
+    "longers": "Долгие доставки",
+    "later_rest": "Долгие заказы",
+    "assembly_rest": "Долгая сборка заказа",
+    "drink_rest": "Долгие напитки",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +74,7 @@ async def run_manual_unit_report(
     chat_id = op_config["chat_id"]
     topic_id = op_config.get("topic_id")
     message_date = op_config.get("message_date")
+    result_request_id = str(op_config.get("result_request_id") or "")
 
     # Manual-job всегда работает с одной точкой, но используем bulk helper для единообразия.
     units = await load_units_by_uuids(db, [unit_uuid])
@@ -75,12 +86,18 @@ async def run_manual_unit_report(
     account_auth_map = await load_accounts_and_tokens_bulk(db, {account_id})
     dodo_api.prime_account_token_cache(account_auth_map)
     account, _ = account_auth_map.get(account_id, (None, None))
-    chat_languages = await load_chat_languages(
-        db,
-        [chat_id],
-        fallback_account_ids_by_chat={int(chat_id): int(account_id)},
-    )
-    chat_platforms = await load_chat_platforms(db, [chat_id])
+    if result_request_id:
+        language = "ru"
+        platform = "webapp"
+    else:
+        chat_languages = await load_chat_languages(
+            db,
+            [chat_id],
+            fallback_account_ids_by_chat={int(chat_id): int(account_id)},
+        )
+        chat_platforms = await load_chat_platforms(db, [chat_id])
+        language = chat_languages.get(chat_id, "ru")
+        platform = chat_platforms.get(chat_id, "telegram")
 
     request = ManualUnitReportRequest(
         unit_uuid=unit_uuid,
@@ -90,8 +107,8 @@ async def run_manual_unit_report(
         account_properties=account.properties if account else None,
         chat_id=chat_id,
         topic_id=topic_id,
-        language=chat_languages.get(chat_id, "ru"),
-        platform=chat_platforms.get(chat_id, "telegram"),
+        language=language,
+        platform=platform,
         message_date=message_date,
         op_config=dict(op_config),
     )
@@ -106,6 +123,30 @@ async def run_manual_unit_report(
             session=dodo_session,
             request_semaphore=request_semaphore,
         )
+        if result_request_id:
+            try:
+                await _build_and_store_webapp_report(
+                    db=db,
+                    request_id=result_request_id,
+                    post=post,
+                    build_report=build_report,
+                    dodo_api=dodo_api,
+                    request=request,
+                )
+            except Exception as exc:
+                await _store_webapp_error(
+                    db=db,
+                    request_id=result_request_id,
+                    post=post,
+                    request=request,
+                    error=str(exc),
+                )
+                raise
+            finally:
+                dodo_api.reset_runtime()
+                dodo_api.clear_account_token_cache()
+            return
+
         rabbitmq_open = getattr(rabbitmq, "open_async", None)
         if callable(rabbitmq_open):
             await rabbitmq_open()
@@ -147,6 +188,100 @@ async def run_manual_unit_report(
             rabbitmq_close = getattr(rabbitmq, "close_async", None)
             if callable(rabbitmq_close):
                 await rabbitmq_close()
+
+
+async def _build_and_store_webapp_report(
+    *,
+    db,
+    request_id: str,
+    post: str,
+    build_report: ManualUnitReportBuilder,
+    dodo_api,
+    request: ManualUnitReportRequest,
+) -> None:
+    report_text, last_error_html, last_error_status = await build_report(
+        dodo_api=dodo_api,
+        request=request,
+    )
+    dt_start, dt_end, date_label = build_report_window(
+        request.message_date,
+        request.unit_timezone,
+    )
+
+    if not report_text:
+        error = html_to_log_text(last_error_html or "Не удалось собрать отчет")
+        await store_webapp_report_result(
+            db=db,
+            request_id=request_id,
+            status="error",
+            error=error,
+            payload={
+                "ok": False,
+                "post": post,
+                "request_id": request_id,
+                "unit_uuid": request.unit_uuid,
+                "unit_name": request.unit_name,
+                "date_label": date_label,
+                "window": {"from": dt_start.isoformat(), "to": dt_end.isoformat()},
+                "error": error,
+                "error_status": last_error_status,
+            },
+        )
+        return
+
+    report_text = translate_report_text(post, request.language, report_text)
+    await store_webapp_report_result(
+        db=db,
+        request_id=request_id,
+        status="done",
+        error=None,
+        payload={
+            "ok": True,
+            "post": post,
+            "request_id": request_id,
+            "unit_uuid": request.unit_uuid,
+            "unit_name": request.unit_name,
+            "date_label": date_label,
+            "window": {"from": dt_start.isoformat(), "to": dt_end.isoformat()},
+            "report_title": REPORT_TITLES.get(post, post),
+            "report_text": report_text,
+            "report_html": telegram_html_to_web_html(report_text),
+        },
+    )
+
+
+async def _store_webapp_error(
+    *,
+    db,
+    request_id: str,
+    post: str,
+    request: ManualUnitReportRequest,
+    error: str,
+) -> None:
+    await store_webapp_report_result(
+        db=db,
+        request_id=request_id,
+        status="error",
+        error=error,
+        payload={
+            "ok": False,
+            "post": post,
+            "request_id": request_id,
+            "unit_uuid": request.unit_uuid,
+            "unit_name": request.unit_name,
+            "error": error,
+        },
+    )
+
+
+def telegram_html_to_web_html(value: str) -> str:
+    """Безопасно переносит простой Telegram HTML в WebApp-страницу."""
+    escaped = html.escape(value)
+    allowed_tags = ("b", "strong", "i", "em", "u", "s", "code")
+    for tag in allowed_tags:
+        escaped = escaped.replace(f"&lt;{tag}&gt;", f"<{tag}>")
+        escaped = escaped.replace(f"&lt;/{tag}&gt;", f"</{tag}>")
+    return escaped.replace("\n", "<br>")
 
 
 def build_report_window(
