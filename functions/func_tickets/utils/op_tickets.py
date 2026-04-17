@@ -48,6 +48,7 @@ class TicketItem:
     order_uuid: Optional[str]
     channel_name: Optional[str]
     courier_name: Optional[str]
+    unit_timezone: Optional[int]
     created_at: Optional[datetime]
 
 
@@ -323,6 +324,7 @@ def _parse_ticket(
         order_uuid=_string_value_by_nested_id(customer_index_fields, ORDER_UUID_FIELD_ID),
         channel_name=_extract_choice_name(channel_field),
         courier_name=None,
+        unit_timezone=unit.timezone if unit else None,
         created_at=_parse_utc_datetime(task.get("create_date")),
     )
 
@@ -450,7 +452,8 @@ def _format_tickets_message(
         if tickets
         else (unit.name if unit and unit.name else "Неизвестное заведение")
     )
-    local_start, local_end = _to_unit_local_window(unit, utc_start, utc_end)
+    unit_timezone = _resolve_report_timezone(unit, tickets)
+    local_start, local_end = _to_unit_local_window(unit_timezone, utc_start, utc_end)
 
     lines = [
         f"📬 <b>Тикеты клиентов в {html.escape(unit_name)}</b>",
@@ -468,7 +471,7 @@ def _format_tickets_message(
             lines.append(f"Курьер: {_format_courier_name(ticket.courier_name)}")
         lines.append(f"Комментарий: {html.escape(ticket.comment)}")
         lines.append(
-            f"Дата и время заказа: {html.escape(_format_order_datetime(unit, ticket.order_date, ticket.order_time))}"
+            f"Дата и время заказа: {html.escape(_format_order_datetime(ticket.order_date, ticket.order_time))}"
         )
         lines.append(
             f'Тикет Pyrus: <a href="{html.escape(_build_pyrus_task_url(ticket.task_id), quote=True)}">открыть</a>'
@@ -497,19 +500,32 @@ def _build_utc_window(now_utc: Optional[datetime] = None) -> tuple[datetime, dat
 
 
 def _to_unit_local_window(
-    unit: Optional[Unit],
+    unit_timezone: Optional[int],
     utc_start: datetime,
     utc_end: datetime,
 ) -> tuple[datetime, datetime]:
     """Переводит UTC-окно в локальное время точки для человекочитаемого отчета."""
     offset = (
-        timedelta(hours=unit.timezone)
-        if unit and unit.timezone is not None
+        timedelta(hours=unit_timezone)
+        if unit_timezone is not None
         else timedelta(0)
     )
     local_start = (utc_start + offset).replace(tzinfo=None)
     local_end = (utc_end + offset).replace(tzinfo=None)
     return local_start, local_end
+
+
+def _resolve_report_timezone(
+    unit: Optional[Unit],
+    tickets: List[TicketItem],
+) -> Optional[int]:
+    """Берет timezone из Unit, а если Unit не подтянулся — из разобранного тикета."""
+    if unit and unit.timezone is not None:
+        return unit.timezone
+    for ticket in tickets:
+        if ticket.unit_timezone is not None:
+            return ticket.unit_timezone
+    return None
 
 
 def _find_nested_value(fields: Any, field_id: int) -> Any:
@@ -565,24 +581,10 @@ def _safe_catalog_unit_name(values: Any) -> str:
     return "Неизвестное заведение"
 
 
-def _format_order_datetime(
-    unit: Optional[Unit],
-    order_date: Optional[str],
-    order_time: Optional[str],
-) -> str:
-    """Форматирует UTC дату/время заказа в локальное время заведения."""
+def _format_order_datetime(order_date: Optional[str], order_time: Optional[str]) -> str:
+    """Форматирует дату и время заказа в привычный для Telegram вид."""
     if not order_date and not order_time:
         return "Не указаны"
-
-    parsed_utc = _parse_order_utc_datetime(order_date, order_time)
-    if parsed_utc is not None:
-        offset = (
-            timedelta(hours=unit.timezone)
-            if unit and unit.timezone is not None
-            else timedelta(0)
-        )
-        local_dt = (parsed_utc + offset).replace(tzinfo=None)
-        return local_dt.strftime("%d.%m.%Y %H:%M")
 
     if order_date:
         try:
@@ -594,33 +596,6 @@ def _format_order_datetime(
         formatted_date = ""
 
     return " ".join(part for part in [formatted_date, order_time] if part).strip() or "Не указаны"
-
-
-def _parse_order_utc_datetime(
-    order_date: Optional[str],
-    order_time: Optional[str],
-) -> Optional[datetime]:
-    """Пытается собрать UTC datetime из отдельных полей Pyrus."""
-    if order_time and "T" in order_time:
-        return _parse_utc_datetime(order_time)
-
-    if not order_date or not order_time:
-        return None
-
-    cleaned_time = order_time.strip()
-    if not cleaned_time:
-        return None
-    if len(cleaned_time.split(":")) == 2:
-        cleaned_time = f"{cleaned_time}:00"
-
-    normalized = f"{order_date.strip()}T{cleaned_time}".replace("Z", "+00:00")
-    try:
-        parsed = datetime.fromisoformat(normalized)
-    except ValueError:
-        return None
-    if parsed.tzinfo is not None:
-        return parsed.astimezone(timezone.utc)
-    return parsed.replace(tzinfo=timezone.utc)
 
 
 def _build_pyrus_task_url(task_id: int) -> str:
