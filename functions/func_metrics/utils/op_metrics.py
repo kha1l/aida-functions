@@ -28,7 +28,7 @@ from functions.shared.report_job_runtime import (
     report_job_runtime,
 )
 from functions.shared.report_text_i18n import translate_report_text
-from functions.shared.unit_time import floor_unit_to_hour, resolve_unit_now
+from functions.shared.unit_time import resolve_unit_now
 from functions.func_couriers.utils.manual_report_common import parse_dodo_datetime
 from messaging import build_payload
 
@@ -122,10 +122,9 @@ async def run_metrics(context: OpExecutionContext) -> None:
                 if local_now.hour not in TRIGGER_HOURS:
                     return
 
-                # `production/productivity` принимает только часы, поэтому срезаем период до текущего часа.
-                period_end = floor_unit_to_hour(unit)
-                if period_end.hour not in TRIGGER_HOURS:
-                    return
+                # Берем фактическое локальное время точки, чтобы delivery-метрики
+                # совпадали с оперативными данными, а не отставали до начала часа.
+                period_end = local_now.replace(second=0, microsecond=0)
 
                 candidate_accounts = snapshot.candidate_accounts_for(unit_uuid)
                 if not candidate_accounts:
@@ -233,7 +232,7 @@ async def run_metrics_manual(context: OpExecutionContext) -> None:
         for unit_uuid in sorted_unit_uuids:
             unit = units.get(unit_uuid)
             unit_name = unit.name if unit and unit.name else unit_uuid
-            period_end = floor_unit_to_hour(unit)
+            period_end = resolve_unit_now(unit).replace(second=0, microsecond=0)
             candidate_accounts = candidate_accounts_by_unit.get(unit_uuid, [])
             if not candidate_accounts:
                 context.log.warning("metrics_manual_op: нет токенов для unit %s", unit_uuid)

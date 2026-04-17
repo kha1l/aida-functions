@@ -25,7 +25,8 @@ from functions.shared.report_job_runtime import (
 from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
 
 PAGE_SIZE = 500
-STOCK_ITEMS_BATCH_SIZE = 100
+PRICE_LOOKBACK_DAYS = 150
+PRODUCTION_PRICE_LOOKBACK_DAYS = 30
 MAX_CONCURRENT_UNITS = 15
 TRIGGER_HOURS = set(schedule_local_hours("writeoff", (11,)))
 SLICE_REASON_LABELS = {
@@ -246,6 +247,7 @@ async def _build_writeoff_report(
         account_id=account_id,
         unit_uuid=unit_uuid,
         stock_item_ids=stock_item_ids,
+        dt_end=dt_end,
     )
     if ingredient_costs_result[0] is None:
         return None, ingredient_costs_result[1], ingredient_costs_result[2]
@@ -402,60 +404,305 @@ async def _fetch_ingredient_costs(
     account_id: int,
     unit_uuid: str,
     stock_item_ids: List[str],
+    dt_end: datetime,
 ) -> tuple[Optional[Dict[str, IngredientCost]], Optional[str], Optional[int]]:
-    """Загружает складские остатки только по нужным ингредиентам и считает цену единицы."""
+    """Собирает карту цен ингредиентов по той же цепочке источников, что и legacy-метрики."""
     if not stock_item_ids:
         return {}, None, 200
 
     result: Dict[str, IngredientCost] = {}
-    for chunk in _chunked(stock_item_ids, STOCK_ITEMS_BATCH_SIZE):
-        skip = 0
-        while True:
-            params = {
-                "units": unit_uuid,
-                "categories": "Ingredient",
-                "stockItems": ",".join(chunk),
-                "skip": skip,
-                "take": PAGE_SIZE,
-            }
-            response = await dodo_api.get(
-                account_id,
-                "accounting/inventory-stocks",
-                params=params,
-            )
-            if not response.ok:
-                return None, response.error_html, response.status
+    stock_item_filter = set(stock_item_ids)
 
-            data = response.data if isinstance(response.data, dict) else {}
-            rows = data.get("stocks")
-            if not isinstance(rows, list):
-                rows = []
+    error = await _apply_inventory_stock_costs(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        stock_item_filter=stock_item_filter,
+        result=result,
+    )
+    if error is not None:
+        return None, error[0], error[1]
 
-            for row in rows:
-                if not isinstance(row, dict):
-                    continue
-                stock_item_id = _extract_stock_item_id(row)
-                if not stock_item_id:
-                    continue
-                quantity = _to_decimal(row.get("quantity"))
-                balance_in_money = _to_decimal(row.get("balanceInMoney"))
-                unit_cost = (
-                    balance_in_money / quantity
-                    if quantity > 0
-                    else Decimal("0")
-                )
-                result[stock_item_id] = IngredientCost(
-                    stock_item_id=stock_item_id,
-                    name=str(row.get("name") or row.get("stockItemName") or stock_item_id).strip() or stock_item_id,
-                    unit_cost=unit_cost,
-                    quantity_unit=_measurement_unit_suffix(row.get("measurementUnit")),
-                )
+    error = await _apply_production_costs(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        stock_item_filter=stock_item_filter,
+        dt_start=dt_end - timedelta(days=PRODUCTION_PRICE_LOOKBACK_DAYS),
+        dt_end=dt_end,
+        result=result,
+    )
+    if error is not None:
+        return None, error[0], error[1]
 
-            if data.get("isEndOfListReached"):
-                break
-            skip += PAGE_SIZE
+    error = await _fill_costs_from_incoming_stock_items(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        stock_item_filter=stock_item_filter,
+        dt_start=dt_end - timedelta(days=PRICE_LOOKBACK_DAYS),
+        dt_end=dt_end,
+        result=result,
+    )
+    if error is not None:
+        return None, error[0], error[1]
+
+    error = await _fill_costs_from_stock_transfers(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        stock_item_filter=stock_item_filter,
+        dt_start=dt_end - timedelta(days=PRICE_LOOKBACK_DAYS),
+        dt_end=dt_end,
+        result=result,
+    )
+    if error is not None:
+        return None, error[0], error[1]
 
     return result, None, 200
+
+
+async def _apply_inventory_stock_costs(
+    *,
+    dodo_api,
+    account_id: int,
+    unit_uuid: str,
+    stock_item_filter: set[str],
+    result: Dict[str, IngredientCost],
+) -> Optional[tuple[Optional[str], Optional[int]]]:
+    """Первый источник цены: текущая стоимость остатков `balanceInMoney / quantity`."""
+    skip = 0
+    while True:
+        response = await dodo_api.get(
+            account_id,
+            "accounting/inventory-stocks",
+            params={
+                "units": unit_uuid,
+                "skip": skip,
+                "take": PAGE_SIZE,
+            },
+        )
+        if not response.ok:
+            return response.error_html, response.status
+
+        data = response.data if isinstance(response.data, dict) else {}
+        rows = data.get("stocks")
+        if not isinstance(rows, list):
+            rows = []
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            stock_item_id = _extract_stock_item_id(row)
+            if not stock_item_id or stock_item_id not in stock_item_filter:
+                continue
+            quantity = _to_decimal(row.get("quantity"))
+            balance_in_money = _to_decimal(row.get("balanceInMoney"))
+            unit_cost = balance_in_money / quantity if quantity > 0 else Decimal("0")
+            _set_ingredient_cost(
+                result=result,
+                stock_item_id=stock_item_id,
+                unit_cost=unit_cost,
+                name=str(row.get("name") or row.get("stockItemName") or stock_item_id).strip() or stock_item_id,
+                quantity_unit=_measurement_unit_suffix(row.get("measurementUnit")),
+                overwrite=True,
+            )
+
+        if data.get("isEndOfListReached"):
+            break
+        skip += PAGE_SIZE
+
+    return None
+
+
+async def _apply_production_costs(
+    *,
+    dodo_api,
+    account_id: int,
+    unit_uuid: str,
+    stock_item_filter: set[str],
+    dt_start: datetime,
+    dt_end: datetime,
+    result: Dict[str, IngredientCost],
+) -> Optional[tuple[Optional[str], Optional[int]]]:
+    """Второй источник цены: производство полуфабрикатов за последние 30 дней."""
+    skip = 0
+    while True:
+        response = await dodo_api.get(
+            account_id,
+            "accounting/semi-finished-products-production",
+            params={
+                "units": unit_uuid,
+                "from": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),
+                "to": dt_end.strftime("%Y-%m-%dT%H:%M:%S"),
+                "skip": skip,
+                "take": PAGE_SIZE,
+            },
+        )
+        if not response.ok:
+            return response.error_html, response.status
+
+        data = response.data if isinstance(response.data, dict) else {}
+        rows = data.get("productions")
+        if not isinstance(rows, list):
+            rows = []
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            stock_item_id = _extract_stock_item_id(row)
+            if not stock_item_id or stock_item_id not in stock_item_filter:
+                continue
+            _set_ingredient_cost(
+                result=result,
+                stock_item_id=stock_item_id,
+                unit_cost=_to_decimal(row.get("price")),
+                overwrite=True,
+            )
+
+        if data.get("isEndOfListReached"):
+            break
+        skip += PAGE_SIZE
+
+    return None
+
+
+async def _fill_costs_from_incoming_stock_items(
+    *,
+    dodo_api,
+    account_id: int,
+    unit_uuid: str,
+    stock_item_filter: set[str],
+    dt_start: datetime,
+    dt_end: datetime,
+    result: Dict[str, IngredientCost],
+) -> Optional[tuple[Optional[str], Optional[int]]]:
+    """Третий источник цены: приходы за последние 150 дней, только если цена еще нулевая."""
+    skip = 0
+    while True:
+        response = await dodo_api.get(
+            account_id,
+            "accounting/incoming-stock-items",
+            params={
+                "units": unit_uuid,
+                "from": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),
+                "to": dt_end.strftime("%Y-%m-%dT%H:%M:%S"),
+                "skip": skip,
+                "take": PAGE_SIZE,
+            },
+        )
+        if not response.ok:
+            return response.error_html, response.status
+
+        data = response.data if isinstance(response.data, dict) else {}
+        rows = data.get("incomingStockItems")
+        if not isinstance(rows, list):
+            rows = []
+
+        # Идем как в legacy-коде: с конца страницы к началу.
+        for row in reversed(rows):
+            if not isinstance(row, dict):
+                continue
+            stock_item_id = _extract_stock_item_id(row)
+            if not stock_item_id or stock_item_id not in stock_item_filter:
+                continue
+            price = _to_decimal(row.get("pricePerMeasurementUnitWithVat"))
+            if price != 0 and _current_unit_cost(result, stock_item_id) == 0:
+                _set_ingredient_cost(
+                    result=result,
+                    stock_item_id=stock_item_id,
+                    unit_cost=price,
+                    overwrite=True,
+                )
+
+        if data.get("isEndOfListReached"):
+            break
+        skip += PAGE_SIZE
+
+    return None
+
+
+async def _fill_costs_from_stock_transfers(
+    *,
+    dodo_api,
+    account_id: int,
+    unit_uuid: str,
+    stock_item_filter: set[str],
+    dt_start: datetime,
+    dt_end: datetime,
+    result: Dict[str, IngredientCost],
+) -> Optional[tuple[Optional[str], Optional[int]]]:
+    """Четвертый источник цены: полученные перемещения за последние 150 дней."""
+    skip = 0
+    while True:
+        response = await dodo_api.get(
+            account_id,
+            "accounting/stock-transfers",
+            params={
+                "units": unit_uuid,
+                "receivedFrom": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),
+                "receivedTo": dt_end.strftime("%Y-%m-%dT%H:%M:%S"),
+                "statuses": "Received",
+                "skip": skip,
+                "take": PAGE_SIZE,
+            },
+        )
+        if not response.ok:
+            return response.error_html, response.status
+
+        data = response.data if isinstance(response.data, dict) else {}
+        rows = data.get("transfers")
+        if not isinstance(rows, list):
+            rows = []
+
+        for row in reversed(rows):
+            if not isinstance(row, dict):
+                continue
+            stock_item_id = _extract_stock_item_id(row)
+            if not stock_item_id or stock_item_id not in stock_item_filter:
+                continue
+            price = _to_decimal(row.get("pricePerUnitWithVat"))
+            if price != 0 and _current_unit_cost(result, stock_item_id) == 0:
+                _set_ingredient_cost(
+                    result=result,
+                    stock_item_id=stock_item_id,
+                    unit_cost=price,
+                    overwrite=True,
+                )
+
+        if data.get("isEndOfListReached"):
+            break
+        skip += PAGE_SIZE
+
+    return None
+
+
+def _set_ingredient_cost(
+    *,
+    result: Dict[str, IngredientCost],
+    stock_item_id: str,
+    unit_cost: Decimal,
+    name: str | None = None,
+    quantity_unit: str | None = None,
+    overwrite: bool,
+) -> None:
+    """Обновляет цену ингредиента, сохраняя уже найденные имя и единицу измерения."""
+    current = result.get(stock_item_id)
+    if current is not None and not overwrite:
+        return
+
+    result[stock_item_id] = IngredientCost(
+        stock_item_id=stock_item_id,
+        name=(name or (current.name if current else "") or stock_item_id).strip() or stock_item_id,
+        unit_cost=unit_cost,
+        quantity_unit=(quantity_unit or (current.quantity_unit if current else "") or "").strip(),
+    )
+
+
+def _current_unit_cost(result: Dict[str, IngredientCost], stock_item_id: str) -> Decimal:
+    """Возвращает текущую цену ингредиента или 0, если цена еще не найдена."""
+    current = result.get(stock_item_id)
+    return current.unit_cost if current is not None else Decimal("0")
 
 
 def _collect_stock_item_ids(
@@ -540,14 +787,13 @@ def _build_reason_totals(
 
     for row in product_rows:
         reason = str(row.get("reason") or "Unknown").strip() or "Unknown"
-        row_quantity = _to_decimal(row.get("quantity"))
         for stock_item in row.get("stockItems") or []:
             if not isinstance(stock_item, dict):
                 continue
             stock_item_id = _extract_stock_item_id(stock_item)
             if not stock_item_id:
                 continue
-            ingredient_quantity = _to_decimal(stock_item.get("quantity")) * row_quantity
+            ingredient_quantity = _to_decimal(stock_item.get("quantity"))
             reason_bucket = totals_by_reason_and_item[reason]
             reason_bucket[stock_item_id] = reason_bucket.get(stock_item_id, Decimal("0")) + ingredient_quantity
 
@@ -577,7 +823,6 @@ def _product_row_amount(
     ingredient_costs: Dict[str, IngredientCost],
 ) -> Decimal:
     """Считает стоимость списанного продукта через ингредиенты в его составе."""
-    row_quantity = _to_decimal(row.get("quantity"))
     amount = Decimal("0")
     for stock_item in row.get("stockItems") or []:
         if not isinstance(stock_item, dict):
@@ -588,7 +833,7 @@ def _product_row_amount(
         cost_info = ingredient_costs.get(stock_item_id)
         if cost_info is None:
             continue
-        amount += _to_decimal(stock_item.get("quantity")) * row_quantity * cost_info.unit_cost
+        amount += _to_decimal(stock_item.get("quantity")) * cost_info.unit_cost
     return amount
 
 
@@ -728,6 +973,7 @@ def _label_reason(reason: str) -> str:
         "ExpiredShowcaseTime": "Списания по времени с витрины",
         "Expired": "Просрочка",
         "Defected": "Брак",
+        "DamagedPackaging": "Брак упаковки",
         "HumanElement": "Человеческий фактор",
     }
     return known.get(reason, reason)
@@ -776,12 +1022,6 @@ def _extract_stock_item_id(row: dict) -> str:
 def _measurement_unit_suffix(value: object) -> str:
     """Преобразует код единицы измерения в человекочитаемый суффикс."""
     return MEASUREMENT_UNITS.get(str(value or "").strip(), "")
-
-
-def _chunked(values: List[str], chunk_size: int) -> Iterable[List[str]]:
-    """Разбивает список значений на небольшие чанки для query-параметров."""
-    for index in range(0, len(values), chunk_size):
-        yield values[index:index + chunk_size]
 
 
 def _to_decimal(value: object) -> Decimal:
