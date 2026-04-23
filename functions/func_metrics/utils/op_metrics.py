@@ -39,6 +39,11 @@ COMPARE_PERIOD_DAYS = 7
 LONG_DINE_IN_THRESHOLD_SECONDS = 15 * 60
 
 
+def _floor_to_hour(value: datetime) -> datetime:
+    """Dodo `production/productivity` принимает только границы, округленные до часа."""
+    return value.replace(minute=0, second=0, microsecond=0)
+
+
 @dataclass(frozen=True, slots=True)
 class MetricsSalesTotals:
     """Агрегаты продаж за период по всем каналам."""
@@ -326,10 +331,12 @@ async def _build_metrics_report(
         "delivery/statistics/",
         params=params_current,
     )
-    productivity_task = dodo_api.get(
-        account_id,
-        "production/productivity",
-        params=params_current,
+    productivity_task = _fetch_productivity_stats(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        current_start=current_start,
+        period_end=period_end,
     )
     courier_orders_task = _fetch_delivery_times_by_order_id(
         dodo_api=dodo_api,
@@ -392,8 +399,8 @@ async def _build_metrics_report(
 
     if not delivery_result.ok:
         return None, delivery_result.error_html, delivery_result.status
-    if not productivity_result.ok:
-        return None, productivity_result.error_html, productivity_result.status
+    if productivity_result[0] is None:
+        return None, productivity_result[1], productivity_result[2]
     if courier_orders_result[0] is None:
         return None, courier_orders_result[1], courier_orders_result[2]
     if not handover_result.ok:
@@ -413,9 +420,8 @@ async def _build_metrics_report(
     delivery_stats = _extract_delivery_stats(
         delivery_result.data if isinstance(delivery_result.data, dict) else {}
     )
-    productivity_stats = _extract_productivity_stats(
-        productivity_result.data if isinstance(productivity_result.data, dict) else {}
-    )
+    productivity_stats = productivity_result[0]
+    assert productivity_stats is not None
     delivery_times_by_order_id = courier_orders_result[0] or {}
     handover_stats = _extract_handover_stats(
         handover_result.data if isinstance(handover_result.data, dict) else {}
@@ -528,6 +534,40 @@ async def _fetch_delivery_times_by_order_id(
         skip += PAGE_SIZE
 
     return delivery_times_by_order_id, None, 200
+
+
+async def _fetch_productivity_stats(
+    *,
+    dodo_api,
+    account_id: int,
+    unit_uuid: str,
+    current_start: datetime,
+    period_end: datetime,
+) -> tuple[Optional[MetricsProductivityStats], Optional[str], Optional[int]]:
+    """Получает production/productivity с почасовыми границами периода."""
+    productivity_period_end = _floor_to_hour(period_end)
+    if productivity_period_end <= current_start:
+        return MetricsProductivityStats(
+            sales_per_labor_hour=0.0,
+            products_per_labor_hour=0.0,
+            orders_per_courier_labor_hour=0.0,
+        ), None, 200
+
+    result = await dodo_api.get(
+        account_id,
+        "production/productivity",
+        params={
+            "units": unit_uuid,
+            "from": current_start.strftime("%Y-%m-%dT%H:%M:%S"),
+            "to": productivity_period_end.strftime("%Y-%m-%dT%H:%M:%S"),
+        },
+    )
+    if not result.ok:
+        return None, result.error_html, result.status
+
+    return _extract_productivity_stats(
+        result.data if isinstance(result.data, dict) else {}
+    ), None, 200
 
 
 async def _fetch_customer_ratings(
