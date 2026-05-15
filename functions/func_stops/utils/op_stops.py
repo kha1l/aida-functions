@@ -31,6 +31,8 @@ STOP_POSTS = (
 )
 MAX_CONCURRENT_UNITS = 15
 WINDOW_MINUTES = 5
+DATA_LAG_MINUTES = 5
+SECTOR_LOOKBACK_HOURS = 24
 
 CHANNEL_LABELS = {
     "Takeaway": "🚶 Самовывоз",
@@ -175,7 +177,7 @@ async def _process_unit(
         context.log.warning("stops_op: нет токенов для unit %s", unit_uuid)
         return
 
-    dt_start, dt_end = build_previous_local_minute_window(unit, minutes=WINDOW_MINUTES)
+    dt_start, dt_end = _build_report_window(unit)
     collected_messages: Optional[Dict[str, str]] = None
     last_error_html: Optional[str] = None
     last_error_status: Optional[int] = None
@@ -271,12 +273,16 @@ async def _collect_stop_messages(
             )
         )
     if need_sectors:
+        # Сектор может быть остановлен задолго до текущего окна, а возобновлен
+        # только сейчас. Берем расширенный lookback и ниже фильтруем именно
+        # по локальному `endedAtLocal`/`startedAtLocal`.
+        sector_query_start = dt_start - timedelta(hours=SECTOR_LOOKBACK_HOURS)
         order.append("sectors")
         tasks.append(
             dodo_api.get(
                 account_id,
                 "delivery/stop-sales-sectors",
-                params=_build_query_params(unit_uuid, dt_start, dt_end),
+                params=_build_query_params(unit_uuid, sector_query_start, dt_end),
             )
         )
 
@@ -359,6 +365,15 @@ def _build_query_params(unit_uuid: str, dt_start: datetime, dt_end: datetime) ->
         "from": dt_start.strftime("%Y-%m-%dT%H:%M:%S"),
         "to": dt_end.strftime("%Y-%m-%dT%H:%M:%S"),
     }
+
+
+def _build_report_window(unit: Optional[Unit]) -> tuple[datetime, datetime]:
+    """Возвращает локальное окно отчета с небольшим лагом на задержку Dodo API."""
+    dt_start, dt_end = build_previous_local_minute_window(unit, minutes=WINDOW_MINUTES)
+    if DATA_LAG_MINUTES <= 0:
+        return dt_start, dt_end
+    lag = timedelta(minutes=DATA_LAG_MINUTES)
+    return dt_start - lag, dt_end - lag
 
 
 def _rows_from_result(result, key: str) -> List[dict]:

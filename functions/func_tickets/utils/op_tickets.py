@@ -350,12 +350,17 @@ async def _resolve_ticket_courier_name(
         return None
 
     for account_id in candidate_accounts:
+        lookup_order_date = _resolve_order_lookup_date(
+            ticket.order_date,
+            ticket.order_time,
+            ticket.unit_timezone,
+        )
         orders_by_id = await _load_delivery_orders_for_date(
             context=context,
             dodo_api=dodo_api,
             unit_uuid=ticket.unit_uuid,
             account_id=account_id,
-            order_date=ticket.order_date,
+            order_date=lookup_order_date or ticket.order_date,
             cache=courier_orders_cache,
         )
         order = orders_by_id.get(normalized_order_uuid)
@@ -471,7 +476,7 @@ def _format_tickets_message(
             lines.append(f"Курьер: {_format_courier_name(ticket.courier_name)}")
         lines.append(f"Комментарий: {html.escape(ticket.comment)}")
         lines.append(
-            f"Дата и время заказа: {html.escape(_format_order_datetime(ticket.order_date, ticket.order_time))}"
+            f"Дата и время заказа: {html.escape(_format_order_datetime(ticket.order_date, ticket.order_time, ticket.unit_timezone))}"
         )
         lines.append(
             f'Тикет Pyrus: <a href="{html.escape(_build_pyrus_task_url(ticket.task_id), quote=True)}">открыть</a>'
@@ -581,10 +586,18 @@ def _safe_catalog_unit_name(values: Any) -> str:
     return "Неизвестное заведение"
 
 
-def _format_order_datetime(order_date: Optional[str], order_time: Optional[str]) -> str:
-    """Форматирует дату и время заказа в привычный для Telegram вид."""
+def _format_order_datetime(
+    order_date: Optional[str],
+    order_time: Optional[str],
+    unit_timezone: Optional[int],
+) -> str:
+    """Форматирует UTC дату/время заказа в локальное время точки."""
     if not order_date and not order_time:
         return "Не указаны"
+
+    local_datetime = _to_order_local_datetime(order_date, order_time, unit_timezone)
+    if local_datetime is not None:
+        return local_datetime.strftime("%d.%m.%Y %H:%M")
 
     if order_date:
         try:
@@ -596,6 +609,47 @@ def _format_order_datetime(order_date: Optional[str], order_time: Optional[str])
         formatted_date = ""
 
     return " ".join(part for part in [formatted_date, order_time] if part).strip() or "Не указаны"
+
+
+def _resolve_order_lookup_date(
+    order_date: Optional[str],
+    order_time: Optional[str],
+    unit_timezone: Optional[int],
+) -> Optional[str]:
+    """Возвращает локальную дату заказа для запросов в Dodo API."""
+    local_datetime = _to_order_local_datetime(order_date, order_time, unit_timezone)
+    if local_datetime is None:
+        return order_date
+    return local_datetime.strftime("%Y-%m-%d")
+
+
+def _to_order_local_datetime(
+    order_date: Optional[str],
+    order_time: Optional[str],
+    unit_timezone: Optional[int],
+) -> Optional[datetime]:
+    """Собирает UTC дату/время заказа и сдвигает ее в локальное время точки."""
+    if not order_date or not order_time:
+        return None
+
+    order_date = order_date.strip()
+    order_time = order_time.strip()
+    if not order_date or not order_time:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(f"{order_date}T{order_time}".replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+    if parsed.tzinfo is not None:
+        if unit_timezone is None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed.astimezone(timezone(timedelta(hours=unit_timezone))).replace(tzinfo=None)
+
+    if unit_timezone is None:
+        return parsed
+    return parsed + timedelta(hours=unit_timezone)
 
 
 def _build_pyrus_task_url(task_id: int) -> str:
