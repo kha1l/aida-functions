@@ -1,12 +1,12 @@
 # aida_functions
 
-`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API / Pyrus / OpenRouter и публикует готовые payload в RabbitMQ.
+`aida_functions` — сервис на `Dagster`, который собирает отчеты и уведомления для экосистемы Aida, читает данные из PostgreSQL, ходит в Dodo API / Pyrus / Zveno и публикует готовые payload в RabbitMQ.
 
 ## Что внутри
 
 - daily jobs по расписанию: курьеры, ресторан, метрики, отказы, брак, списания, дни рождения, юбилеи/стаж и другие;
 - manual jobs без расписания, которые запускаются из `aida3` по нажатию кнопок;
-- shared Dagster-ресурсы для БД, RabbitMQ, Dodo API, OpenRouter и Pyrus;
+- shared Dagster-ресурсы для БД, RabbitMQ, Dodo API, Zveno и Pyrus;
 - bulk-запросы к БД в `database/requests.py`, чтобы job'ы меньше дергали PostgreSQL;
 - локализация текстов отчетов по языку чата из `special.settings.country` (`ru` / `en`);
 - общий runtime для manual-отчетов в `functions/shared/manual_report_runtime.py`;
@@ -19,7 +19,7 @@
 | `defs.py` | Корневой `Definitions` со всеми jobs, schedules и ресурсами |
 | `config.py` | Настройки из env |
 | `database/` | SQLAlchemy-модели, engine и bulk-запросы |
-| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api`, `openrouter`, `pyrus` |
+| `resources/` | Dagster-ресурсы `db`, `rabbitmq`, `dodo_api`, `zveno`, `pyrus` |
 | `messaging.py` | Формирование и публикация payload в RabbitMQ |
 | `functions/func_couriers/` | Daily-отчет по курьерам и delivery-manual jobs |
 | `functions/func_stationary/` | Daily-отчет по ресторану и stationary-manual jobs |
@@ -36,7 +36,7 @@
 - `metrics_job` — запускается каждый час и отправляет отчет только тем точкам, у которых локальное время равно `14:00`, `19:00` или `23:00`
 - `refusal_job` — hourly-отчет по отмененным заказам за предыдущий завершенный локальный час точки
 - `revenue_job`
-- `staff_job` — ежедневный отчет по юбилеям и годовщинам работы с поздравлениями через OpenRouter
+- `staff_job` — ежедневный отчет по юбилеям и годовщинам работы с поздравлениями через Zveno
 - `stationary_job`
 - `stock_job` — запускается каждый час и отправляет отчет только точкам, у которых локальное время равно `08:00` или `15:00`
 - `stops_job` — каждые 5 минут собирает четыре типа stop-отчетов (`stops_rest`, `stops_ings`, `stops_key_ings`, `stops_sector`) за предыдущее завершенное локальное 5-минутное окно точки
@@ -128,15 +128,15 @@ dagster job execute -m defs -j couriers_job
 - `PYRUS_TICKETS_CATALOG_ID`
 - `PYRUS_TICKETS_FORM_ID`
 
-### OpenRouter
+### Zveno AI
 
-- `OPENROUTER_API_KEY`
-- `OPENROUTER_BASE_URL`
-- `OPENROUTER_MODEL`
-- `OPENROUTER_TIMEOUT_SECONDS`
-- `OPENROUTER_RETRIES`
-- `OPENROUTER_HTTP_REFERER`
-- `OPENROUTER_APP_TITLE`
+- `ZVENOAI_API_KEY`
+- `ZVENOAI_BASE_URL`
+- `ZVENOAI_MODEL`
+- `ZVENOAI_TIMEOUT_SECONDS`
+- `ZVENOAI_RETRIES`
+- `ZVENOAI_MAX_CONCURRENT_REQUESTS`
+- `ZVENOAI_MIN_REQUEST_INTERVAL_SECONDS`
 
 ### Couriers и погода
 
@@ -183,7 +183,7 @@ SCHEDULE_WRITEOFF_HOURS=11
 ## Полезные детали
 
 - `resources/dodo_api.py` умеет retry на `429/500`, сетевые ошибки и shared `aiohttp` session.
-- `resources/openrouter.py` дает простой async-клиент для генерации поздравлений через OpenRouter.
+- `resources/zveno.py` дает простой async-клиент для генерации поздравлений через Zveno.
 - `resources/pyrus.py` инкапсулирует авторизацию и чтение тикетов из Pyrus.
 - `database/requests.py` строит bulk-выборки, чтобы job'ы меньше ходили в БД.
 - `functions/shared/manual_report_runtime.py` дает единый lifecycle для manual-отчетов.

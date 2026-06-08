@@ -43,7 +43,7 @@ async def run_birthday(context: OpExecutionContext) -> None:
     db = context.resources.db
     rabbitmq = context.resources.rabbitmq
     dodo_api = context.resources.dodo_api
-    openrouter = context.resources.openrouter
+    ai_client = context.resources.zveno
 
     snapshot = await load_report_job_snapshot(
         db,
@@ -68,7 +68,7 @@ async def run_birthday(context: OpExecutionContext) -> None:
         )
         return
 
-    async with report_job_runtime(dodo_api, rabbitmq, openrouter=openrouter):
+    async with report_job_runtime(dodo_api, rabbitmq, ai_client=ai_client):
         async def process_unit(unit_uuid: str) -> None:
             async with semaphore:
                 subscribers = snapshot.subscribers_for(unit_uuid)
@@ -92,7 +92,7 @@ async def run_birthday(context: OpExecutionContext) -> None:
                 for account_id in candidate_accounts:
                     report_texts, last_error_html, last_error_status = await _build_birthday_report(
                         dodo_api=dodo_api,
-                        openrouter=openrouter,
+                        ai_client=ai_client,
                         unit_uuid=unit_uuid,
                         unit_name=unit_name,
                         account_id=account_id,
@@ -140,7 +140,7 @@ async def run_birthday(context: OpExecutionContext) -> None:
 async def _build_birthday_report(
     *,
     dodo_api,
-    openrouter,
+    ai_client,
     unit_uuid: str,
     unit_name: str,
     account_id: int,
@@ -171,7 +171,7 @@ async def _build_birthday_report(
         language: await _format_birthday_message(
             unit_name=unit_name,
             employees=employees,
-            openrouter=openrouter,
+            ai_client=ai_client,
             context=context,
             language=language,
         )
@@ -223,7 +223,7 @@ async def _format_birthday_message(
     *,
     unit_name: str,
     employees: List[BirthdayEmployee],
-    openrouter,
+    ai_client,
     context: OpExecutionContext,
     language: str,
 ) -> str:
@@ -240,7 +240,7 @@ async def _format_birthday_message(
             lines.append(", ".join(details))
         lines.append(
             await _generate_birthday_greeting(
-                openrouter=openrouter,
+                ai_client=ai_client,
                 employee=employee,
                 context=context,
                 unit_name=unit_name,
@@ -254,13 +254,13 @@ async def _format_birthday_message(
 
 async def _generate_birthday_greeting(
     *,
-    openrouter,
+    ai_client,
     employee: BirthdayEmployee,
     context: OpExecutionContext,
     unit_name: str,
     language: str,
 ) -> str:
-    """Генерирует короткое поздравление через OpenRouter и безопасно откатывается на шаблон."""
+    """Генерирует короткое поздравление через Zveno и безопасно откатывается на шаблон."""
     details = [
         # {pick(language, 'Должность', 'Role')}: {employee.position_name or pick(language, 'сотрудник', 'employee')}.",
         f"{pick(language, "Нужно ровно 1 короткое предложение.", "Need exactly 1 short sentence.")}",
@@ -271,32 +271,19 @@ async def _generate_birthday_greeting(
     if unit_name:
         details.append(f"{pick(language, 'Заведение', 'Location')}: {unit_name}.")
 
-    result = await openrouter.generate_greeting(
+    return await ai_client.generate_greeting_or_fallback(
         employee_name=employee.first_name or employee.full_name,
         occasion=pick(language, "день рождения", "birthday"),
         language=language,
         age=employee.age,
         details=details,
         tone=pick(language, "дружелюбный, живой и теплый", "friendly, lively and warm"),
+        fallback=lambda: _fallback_birthday_greeting(employee, language),
+        normalize=_normalize_greeting_text,
+        log_warning=context.log.warning,
+        log_prefix="birthday_op",
+        subject=employee.full_name,
     )
-    context.log.info(result)
-    if not result.ok or not result.text:
-        if result.error_html:
-            context.log.warning(
-                "birthday_op: OpenRouter не сгенерировал поздравление для %s: %s",
-                employee.full_name,
-                html_to_log_text(result.error_html),
-            )
-        return _fallback_birthday_greeting(employee, language)
-
-    greeting = _normalize_greeting_text(result.text)
-    if greeting is None:
-        context.log.warning(
-            "birthday_op: OpenRouter вернул неожиданный формат поздравления для %s",
-            employee.full_name,
-        )
-        return _fallback_birthday_greeting(employee, language)
-    return greeting
 
 
 def _normalize_greeting_text(value: str) -> Optional[str]:

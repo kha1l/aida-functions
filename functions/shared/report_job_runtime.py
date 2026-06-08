@@ -112,7 +112,7 @@ async def report_job_runtime(
     dodo_api,
     rabbitmq,
     *,
-    openrouter=None,
+    ai_client=None,
 ):
     """Поднимает общие runtime-зависимости job: aiohttp session, limiter и RabbitMQ."""
     request_semaphore = asyncio.Semaphore(max(1, dodo_api.max_concurrent_requests))
@@ -127,12 +127,12 @@ async def report_job_runtime(
             request_semaphore=request_semaphore,
         )
 
-        if openrouter is not None:
-            openrouter_timeout = aiohttp.ClientTimeout(total=openrouter.timeout_seconds)
-            openrouter_session = await stack.enter_async_context(
-                aiohttp.ClientSession(timeout=openrouter_timeout, trust_env=True)
+        if ai_client is not None:
+            ai_timeout = aiohttp.ClientTimeout(total=ai_client.timeout_seconds)
+            ai_session = await stack.enter_async_context(
+                aiohttp.ClientSession(timeout=ai_timeout, trust_env=True)
             )
-            openrouter.configure_runtime(session=openrouter_session)
+            ai_client.configure_runtime(session=ai_session)
 
         rabbitmq_open = getattr(rabbitmq, "open_async", None)
         if callable(rabbitmq_open):
@@ -143,8 +143,8 @@ async def report_job_runtime(
         finally:
             dodo_api.reset_runtime()
             dodo_api.clear_account_token_cache()
-            if openrouter is not None:
-                openrouter.reset_runtime()
+            if greeting_ai is not None:
+                greeting_ai.reset_runtime()
             rabbitmq_close = getattr(rabbitmq, "close_async", None)
             if callable(rabbitmq_close):
                 await rabbitmq_close()

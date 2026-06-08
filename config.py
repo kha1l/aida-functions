@@ -33,6 +33,24 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _env_first(names: Iterable[str], default: Optional[str] = None) -> Optional[str]:
+    """Возвращает первое непустое значение из списка env-переменных."""
+    for name in names:
+        value = _env(name)
+        if value is not None:
+            return value
+    return default
+
+
+def _env_int_first(names: Iterable[str], default: int) -> int:
+    """Читает первое непустое целое значение из списка env-переменных."""
+    for name in names:
+        value = _env(name)
+        if value is not None:
+            return int(value)
+    return default
+
+
 def _env_int_list(name: str, default: Iterable[int]) -> tuple[int, ...]:
     """Читает список целых чисел из env в формате `1,2,3`."""
     value = os.getenv(name)
@@ -268,35 +286,71 @@ def store_widget_settings() -> StoreWidgetSettings:
     )
 
 
-# -------------------
-# OpenRouter
-# -------------------
-
 @dataclass(frozen=True)
-class OpenRouterSettings:
-    """Настройки доступа к OpenRouter."""
+class ZvenoSettings:
+    """Настройки доступа к Zveno AI."""
 
     api_key: Optional[str]
     base_url: str
     model: str
     timeout_seconds: int
     retries: int
-    http_referer: Optional[str]
-    app_title: Optional[str]
+    max_concurrent_requests: int
+    min_request_interval_seconds: int
 
 
-def openrouter_settings() -> OpenRouterSettings:
-    """Собирает настройки OpenRouter из env."""
-    return OpenRouterSettings(
-        api_key=_env("OPENROUTER_API_KEY"),
-        base_url=_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-        or "https://openrouter.ai/api/v1",
-        model=_env("OPENROUTER_MODEL", "arcee-ai/trinity-large-preview:free")
-        or "arcee-ai/trinity-large-preview:free",
-        timeout_seconds=_env_int("OPENROUTER_TIMEOUT_SECONDS", 60),
-        retries=_env_int("OPENROUTER_RETRIES", 3),
-        http_referer=_env("OPENROUTER_HTTP_REFERER"),
-        app_title=_env("OPENROUTER_APP_TITLE", "aida_functions"),
+def zveno_settings() -> ZvenoSettings:
+    """Собирает настройки Zveno из env с такими же алиасами, как в reminder."""
+    return ZvenoSettings(
+        api_key=_env_first(
+            (
+                "ZVENOAI_API_KEY",
+                "ZVENO_API_KEY",
+                "CEREBRAS_API_KEY",
+                "TOKEN_AI",
+            )
+        ),
+        base_url=_env_first(
+            (
+                "ZVENOAI_BASE_URL",
+                "ZVENO_BASE_URL",
+                "CEREBRAS_BASE_URL",
+            ),
+            "https://api.zveno.ai/v1",
+        )
+        or "https://api.zveno.ai/v1",
+        model=_env_first(
+            (
+                "ZVENOAI_MODEL",
+                "ZVENO_MODEL",
+                "CEREBRAS_MODEL",
+            ),
+            "qwen/qwen3-8b",
+        )
+        or "qwen/qwen3-8b",
+        timeout_seconds=_env_int_first(
+            (
+                "ZVENOAI_TIMEOUT_SECONDS",
+                "ZVENO_TIMEOUT_SECONDS",
+                "CEREBRAS_TIMEOUT_SECONDS",
+            ),
+            120,
+        ),
+        retries=_env_int_first(("ZVENOAI_RETRIES", "ZVENO_RETRIES"), 3),
+        max_concurrent_requests=_env_int_first(
+            (
+                "ZVENOAI_MAX_CONCURRENT_REQUESTS",
+                "ZVENO_MAX_CONCURRENT_REQUESTS",
+            ),
+            2,
+        ),
+        min_request_interval_seconds=_env_int_first(
+            (
+                "ZVENOAI_MIN_REQUEST_INTERVAL_SECONDS",
+                "ZVENO_MIN_REQUEST_INTERVAL_SECONDS",
+            ),
+            0,
+        ),
     )
 
 

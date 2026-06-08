@@ -1,24 +1,25 @@
-"""Простой Dagster-ресурс и async-клиент для генерации поздравлений через OpenRouter."""
+"""Dagster-resource и async-клиент Zveno AI для генерации поздравлений."""
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import html
 import json
+import re
+import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, Optional
+from typing import Callable, Dict, Iterable, Optional
 from urllib.parse import urljoin
 
 import aiohttp
 from dagster import Field, InitResourceContext, IntSource, StringSource, resource
 
-from config import openrouter_settings
+from config import zveno_settings
 
 
 @dataclass(frozen=True)
-class OpenRouterResult:
-    """Результат генерации поздравления."""
+class ZvenoResult:
+    """Результат генерации текста через Zveno."""
 
     ok: bool
     text: Optional[str]
@@ -27,8 +28,8 @@ class OpenRouterResult:
     model: Optional[str]
 
 
-class OpenRouterClient:
-    """Минимальный async-клиент OpenRouter только для поздравлений сотрудников."""
+class ZvenoClient:
+    """Небольшой async-клиент Zveno с безопасным fallback, как в reminder."""
 
     def __init__(
         self,
@@ -36,21 +37,22 @@ class OpenRouterClient:
         api_key: Optional[str],
         base_url: str,
         default_model: str,
-        timeout_seconds: int = 60,
+        timeout_seconds: int = 120,
         retries: int = 3,
-        http_referer: Optional[str] = None,
-        app_title: Optional[str] = None,
+        max_concurrent_requests: int = 2,
+        min_request_interval_seconds: float = 0.0,
     ) -> None:
-        """Сохраняет настройки клиента."""
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.default_model = default_model
         self.timeout_seconds = timeout_seconds
         self.retries = retries
-        self.http_referer = http_referer
-        self.app_title = app_title
         self._shared_session: Optional[aiohttp.ClientSession] = None
         self._request_semaphore: Optional[asyncio.Semaphore] = None
+        self._default_request_semaphore = asyncio.Semaphore(max(1, max_concurrent_requests))
+        self._min_request_interval_seconds = max(0.0, float(min_request_interval_seconds))
+        self._rate_limit_lock = asyncio.Lock()
+        self._next_request_at = 0.0
 
     async def generate_greeting(
         self,
@@ -62,12 +64,12 @@ class OpenRouterClient:
         details: Optional[Iterable[str]] = None,
         tone: str = "теплый, уважительный и живой",
         model: Optional[str] = None,
-    ) -> OpenRouterResult:
-        """Генерирует готовое поздравление сотруднику."""
+    ) -> ZvenoResult:
+        """Генерирует готовое короткое поздравление сотруднику."""
         request_model = model or self.default_model
         if not self.api_key:
             return _result_error(
-                reason="Не задан OPENROUTER_API_KEY",
+                reason="Не задан ZVENOAI_API_KEY",
                 url=_chat_completions_url(self.base_url),
                 model=request_model,
             )
@@ -108,29 +110,30 @@ class OpenRouterClient:
                         "Текст должен быть готов к отправке сотруднику."
                     ),
                 },
-                {
-                    "role": "user",
-                    "content": "\n".join(prompt_lines),
-                },
+                {"role": "user", "content": "\n".join(prompt_lines)},
             ],
             "temperature": 0.8,
         }
-
         return await self._request_greeting(payload=payload, model=request_model)
 
-    async def generate_employee_greeting(
+    async def generate_greeting_or_fallback(
         self,
         *,
         employee_name: str,
         occasion: str,
+        fallback: Callable[[], str],
+        normalize: Callable[[str], Optional[str]],
+        log_warning: Callable[..., None],
+        log_prefix: str,
+        subject: str,
         language: str = "ru",
         age: Optional[int] = None,
         details: Optional[Iterable[str]] = None,
         tone: str = "теплый, уважительный и живой",
         model: Optional[str] = None,
-    ) -> OpenRouterResult:
-        """Совместимый alias для будущего кода."""
-        return await self.generate_greeting(
+    ) -> str:
+        """Генерирует поздравление и безопасно возвращает локальный fallback при любой AI-ошибке."""
+        result = await self.generate_greeting(
             employee_name=employee_name,
             occasion=occasion,
             language=language,
@@ -139,6 +142,25 @@ class OpenRouterClient:
             tone=tone,
             model=model,
         )
+        if not result.ok or not result.text:
+            if result.error_html:
+                log_warning(
+                    "%s: Zveno не сгенерировал поздравление для %s: %s",
+                    log_prefix,
+                    subject,
+                    _html_to_log_text(result.error_html),
+                )
+            return fallback()
+
+        greeting = normalize(result.text)
+        if greeting is None:
+            log_warning(
+                "%s: Zveno вернул неожиданный формат поздравления для %s",
+                log_prefix,
+                subject,
+            )
+            return fallback()
+        return greeting
 
     def configure_runtime(
         self,
@@ -146,22 +168,14 @@ class OpenRouterClient:
         session: Optional[aiohttp.ClientSession] = None,
         request_semaphore: Optional[asyncio.Semaphore] = None,
     ) -> None:
-        """Подключает общий aiohttp session для серии поздравлений в рамках одного job."""
         self._shared_session = session
         self._request_semaphore = request_semaphore
 
     def reset_runtime(self) -> None:
-        """Сбрасывает временные runtime-зависимости после завершения job."""
         self._shared_session = None
         self._request_semaphore = None
 
-    async def _request_greeting(
-        self,
-        *,
-        payload: Dict[str, object],
-        model: str,
-    ) -> OpenRouterResult:
-        """Отправляет запрос в OpenRouter и возвращает готовый текст поздравления."""
+    async def _request_greeting(self, *, payload: Dict[str, object], model: str) -> ZvenoResult:
         url = _chat_completions_url(self.base_url)
         timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
         attempts = 0
@@ -180,26 +194,19 @@ class OpenRouterClient:
                 response_text: Optional[str] = None
                 response_headers: Dict[str, str] = {}
                 status: Optional[int] = None
-
                 try:
-                    semaphore_context = (
-                        self._request_semaphore
-                        if self._request_semaphore is not None
-                        else _null_async_context()
-                    )
+                    semaphore_context = self._request_semaphore or self._default_request_semaphore
                     async with semaphore_context:
+                        await self._wait_for_request_slot()
                         async with session.post(
                             url,
                             json=payload,
-                            headers=_build_headers(
-                                api_key=self.api_key,
-                                http_referer=self.http_referer,
-                                app_title=self.app_title,
-                            ),
+                            headers=_build_headers(api_key=self.api_key),
                         ) as response:
                             status = response.status
                             response_headers = dict(response.headers)
                             response_text = await response.text()
+                            self._remember_rate_limit(response_headers)
                 except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
                     if retries_left > 0:
                         retries_left -= 1
@@ -229,7 +236,7 @@ class OpenRouterClient:
                         data = json.loads(response_text or "{}")
                     except Exception as exc:  # noqa: BLE001
                         return _result_error(
-                            reason="Ответ OpenRouter не является JSON",
+                            reason="Ответ Zveno не является JSON",
                             url=url,
                             model=model,
                             status=status,
@@ -241,7 +248,7 @@ class OpenRouterClient:
 
                     text = _extract_text(data)
                     if text:
-                        return OpenRouterResult(
+                        return ZvenoResult(
                             ok=True,
                             text=text,
                             error_html=None,
@@ -250,7 +257,7 @@ class OpenRouterClient:
                         )
 
                     return _result_error(
-                        reason="OpenRouter не вернул текст поздравления",
+                        reason="Zveno не вернул текст поздравления",
                         url=url,
                         model=model,
                         status=status,
@@ -272,6 +279,20 @@ class OpenRouterClient:
             if close_session:
                 await session.close()
 
+    async def _wait_for_request_slot(self) -> None:
+        if self._min_request_interval_seconds <= 0:
+            return
+        async with self._rate_limit_lock:
+            now = time.monotonic()
+            if self._next_request_at > now:
+                await asyncio.sleep(self._next_request_at - now)
+            self._next_request_at = time.monotonic() + self._min_request_interval_seconds
+
+    def _remember_rate_limit(self, headers: Dict[str, str]) -> None:
+        reset_at = _rate_limit_reset_monotonic(headers)
+        if reset_at is not None:
+            self._next_request_at = max(self._next_request_at, reset_at)
+
 
 @resource(
     config_schema={
@@ -280,86 +301,78 @@ class OpenRouterClient:
         "model": Field(StringSource, is_required=False),
         "timeout_seconds": Field(IntSource, is_required=False),
         "retries": Field(IntSource, is_required=False),
-        "http_referer": Field(StringSource, is_required=False),
-        "app_title": Field(StringSource, is_required=False),
+        "max_concurrent_requests": Field(IntSource, is_required=False),
+        "min_request_interval_seconds": Field(IntSource, is_required=False),
     }
 )
-def openrouter_resource(context: InitResourceContext) -> OpenRouterClient:
-    """Dagster-ресурс OpenRouter с простым клиентом для поздравлений."""
-    cfg = openrouter_settings()
+def zveno_resource(context: InitResourceContext) -> ZvenoClient:
+    """Dagster-resource Zveno AI с env-алиасами как в reminder."""
+    cfg = zveno_settings()
     overrides: Dict[str, str | int | None] = context.resource_config or {}
-
-    return OpenRouterClient(
+    return ZvenoClient(
         api_key=overrides.get("api_key", cfg.api_key),
         base_url=str(overrides.get("base_url", cfg.base_url)),
         default_model=str(overrides.get("model", cfg.model)),
         timeout_seconds=int(overrides.get("timeout_seconds", cfg.timeout_seconds)),
         retries=int(overrides.get("retries", cfg.retries)),
-        http_referer=overrides.get("http_referer", cfg.http_referer),
-        app_title=overrides.get("app_title", cfg.app_title),
+        max_concurrent_requests=int(
+            overrides.get("max_concurrent_requests", cfg.max_concurrent_requests)
+        ),
+        min_request_interval_seconds=float(
+            overrides.get("min_request_interval_seconds", cfg.min_request_interval_seconds)
+        ),
     )
 
 
 def _chat_completions_url(base_url: str) -> str:
-    """Собирает URL OpenRouter chat completions."""
     return urljoin(base_url.rstrip("/") + "/", "chat/completions")
 
 
-def _build_headers(
-    *,
-    api_key: Optional[str],
-    http_referer: Optional[str],
-    app_title: Optional[str],
-) -> Dict[str, str]:
-    """Строит заголовки запроса к OpenRouter."""
-    headers = {
+def _build_headers(*, api_key: Optional[str]) -> Dict[str, str]:
+    return {
         "Authorization": f"Bearer {api_key or ''}",
         "Accept": "application/json",
         "Content-Type": "application/json",
     }
-    if http_referer:
-        headers["HTTP-Referer"] = http_referer
-    if app_title:
-        headers["X-OpenRouter-Title"] = app_title
-    return headers
 
 
 def _extract_text(data: Dict[str, object]) -> Optional[str]:
-    """Достает текст из OpenAI-совместимого ответа OpenRouter."""
     choices = data.get("choices")
     if not isinstance(choices, list) or not choices:
         return None
-
     first_choice = choices[0]
     if not isinstance(first_choice, dict):
         return None
-
     message = first_choice.get("message")
     if not isinstance(message, dict):
         return None
-
     content = message.get("content")
     if isinstance(content, str):
         return content.strip() or None
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "text":
+                continue
+            text = part.get("text")
+            if isinstance(text, str) and text.strip():
+                chunks.append(text.strip())
+        return "\n".join(chunks).strip() or None
     return None
 
 
 def _extract_model(data: Dict[str, object]) -> Optional[str]:
-    """Извлекает имя модели из ответа."""
     model = data.get("model")
     return model if isinstance(model, str) and model.strip() else None
 
 
 def _extract_error_reason(response_text: Optional[str]) -> Optional[str]:
-    """Пытается достать человекочитаемую ошибку из ответа OpenRouter."""
     if not response_text:
         return None
-
     try:
         payload = json.loads(response_text)
     except Exception:  # noqa: BLE001
         return _truncate(response_text)
-
     if isinstance(payload, dict):
         error = payload.get("error")
         if isinstance(error, dict):
@@ -369,7 +382,6 @@ def _extract_error_reason(response_text: Optional[str]) -> Optional[str]:
         message = payload.get("message")
         if isinstance(message, str) and message.strip():
             return message.strip()
-
     return _truncate(response_text)
 
 
@@ -379,7 +391,6 @@ def _retry_delay(
     status: Optional[int] = None,
     headers: Optional[Dict[str, str]] = None,
 ) -> float:
-    """Возвращает задержку перед повторным запросом."""
     if status == 429 and headers:
         retry_after = headers.get("Retry-After") or headers.get("retry-after")
         if retry_after:
@@ -387,11 +398,32 @@ def _retry_delay(
                 return max(float(retry_after), 1.0)
             except ValueError:
                 pass
+        reset_delay = _rate_limit_reset_delay(headers)
+        if reset_delay is not None:
+            return max(reset_delay, 1.0)
     return min(2 ** (attempt - 1), 8)
 
 
+def _rate_limit_reset_delay(headers: Dict[str, str]) -> Optional[float]:
+    reset_value = headers.get("X-RateLimit-Reset") or headers.get("x-ratelimit-reset")
+    if not reset_value:
+        return None
+    try:
+        reset_raw = float(reset_value)
+    except ValueError:
+        return None
+    reset_epoch = reset_raw / 1000 if reset_raw > 10_000_000_000 else reset_raw
+    return max(reset_epoch - time.time(), 0.0)
+
+
+def _rate_limit_reset_monotonic(headers: Dict[str, str]) -> Optional[float]:
+    delay = _rate_limit_reset_delay(headers)
+    if delay is None:
+        return None
+    return time.monotonic() + delay
+
+
 def _extract_request_id(headers: Dict[str, str]) -> Optional[str]:
-    """Извлекает request id из ответа OpenRouter."""
     for header in ("x-request-id", "request-id"):
         value = headers.get(header)
         if value:
@@ -399,17 +431,16 @@ def _extract_request_id(headers: Dict[str, str]) -> Optional[str]:
     return None
 
 
-@contextlib.asynccontextmanager
-async def _null_async_context():
-    """Пустой async-контекст, когда внешний semaphore не передан."""
-    yield
-
-
 def _truncate(text: str, limit: int = 2000) -> str:
-    """Обрезает длинный текст для ошибок."""
     if len(text) <= limit:
         return text
     return f"{text[: max(0, limit - 1)]}…"
+
+
+def _html_to_log_text(value: str) -> str:
+    cleaned = re.sub(r"<[^>]+>", " ", value)
+    cleaned = html.unescape(cleaned)
+    return " ".join(cleaned.split())
 
 
 def _format_error_html(
@@ -423,8 +454,7 @@ def _format_error_html(
     attempts: Optional[int] = None,
     request_id: Optional[str] = None,
 ) -> str:
-    """Формирует понятный HTML-текст ошибки для логов или Telegram."""
-    lines = ["<b>OpenRouter ошибка</b>"]
+    lines = ["<b>Zveno ошибка</b>"]
     lines.append(f"<b>URL:</b> <code>{html.escape(url)}</code>")
     if model:
         lines.append(f"<b>Модель:</b> <code>{html.escape(model)}</code>")
@@ -453,9 +483,8 @@ def _result_error(
     exception: Optional[BaseException] = None,
     attempts: Optional[int] = None,
     request_id: Optional[str] = None,
-) -> OpenRouterResult:
-    """Строит результат с ошибкой."""
-    return OpenRouterResult(
+) -> ZvenoResult:
+    return ZvenoResult(
         ok=False,
         text=None,
         error_html=_format_error_html(

@@ -49,7 +49,7 @@ async def run_staff(context: OpExecutionContext) -> None:
     db = context.resources.db
     rabbitmq = context.resources.rabbitmq
     dodo_api = context.resources.dodo_api
-    openrouter = context.resources.openrouter
+    ai_client = context.resources.zveno
 
     snapshot = await load_report_job_snapshot(
         db,
@@ -74,7 +74,7 @@ async def run_staff(context: OpExecutionContext) -> None:
         )
         return
 
-    async with report_job_runtime(dodo_api, rabbitmq, openrouter=openrouter):
+    async with report_job_runtime(dodo_api, rabbitmq, ai_client=ai_client):
         async def process_unit(unit_uuid: str) -> None:
             async with semaphore:
                 subscribers = snapshot.subscribers_for(unit_uuid)
@@ -98,7 +98,7 @@ async def run_staff(context: OpExecutionContext) -> None:
                 for account_id in candidate_accounts:
                     report_texts, last_error_html, last_error_status = await _build_staff_report(
                         dodo_api=dodo_api,
-                        openrouter=openrouter,
+                        ai_client=ai_client,
                         unit_uuid=unit_uuid,
                         unit_name=unit_name,
                         account_id=account_id,
@@ -146,7 +146,7 @@ async def run_staff(context: OpExecutionContext) -> None:
 async def _build_staff_report(
     *,
     dodo_api,
-    openrouter,
+    ai_client,
     unit_uuid: str,
     unit_name: str,
     account_id: int,
@@ -177,7 +177,7 @@ async def _build_staff_report(
         language: await _format_staff_message(
             unit_name=unit_name,
             events=events,
-            openrouter=openrouter,
+            ai_client=ai_client,
             context=context,
             language=language,
         )
@@ -301,7 +301,7 @@ async def _format_staff_message(
     *,
     unit_name: str,
     events: List[StaffEvent],
-    openrouter,
+    ai_client,
     context: OpExecutionContext,
     language: str,
 ) -> str:
@@ -318,7 +318,7 @@ async def _format_staff_message(
         lines.append(", ".join(details))
         lines.append(
             await _generate_staff_greeting(
-                openrouter=openrouter,
+                ai_client=ai_client,
                 event=event,
                 context=context,
                 unit_name=unit_name,
@@ -332,13 +332,13 @@ async def _format_staff_message(
 
 async def _generate_staff_greeting(
     *,
-    openrouter,
+    ai_client,
     event: StaffEvent,
     context: OpExecutionContext,
     unit_name: str,
     language: str,
 ) -> str:
-    """Генерирует короткое поздравление через OpenRouter."""
+    """Генерирует короткое поздравление через Zveno."""
     details = [
         pick(language, "Нужно ровно 1 короткое предложение.", "Need exactly 1 short sentence."),
         pick(language, "Текст должен быть доброжелательным и без мата.", "The text should be warm and without profanity."),
@@ -364,31 +364,19 @@ async def _generate_staff_greeting(
         )
         age = None
 
-    result = await openrouter.generate_greeting(
+    return await ai_client.generate_greeting_or_fallback(
         employee_name=event.first_name or event.full_name,
         occasion=occasion,
         language=language,
         age=age,
         details=details,
         tone=pick(language, "дружелюбный, живой и теплый", "friendly, lively and warm"),
+        fallback=lambda: _fallback_staff_greeting(event, language),
+        normalize=_normalize_greeting_text,
+        log_warning=context.log.warning,
+        log_prefix="staff_op",
+        subject=event.full_name,
     )
-    if not result.ok or not result.text:
-        if result.error_html:
-            context.log.warning(
-                "staff_op: OpenRouter не сгенерировал поздравление для %s: %s",
-                event.full_name,
-                html_to_log_text(result.error_html),
-            )
-        return _fallback_staff_greeting(event, language)
-
-    greeting = _normalize_greeting_text(result.text)
-    if greeting is None:
-        context.log.warning(
-            "staff_op: OpenRouter вернул неожиданный формат поздравления для %s",
-            event.full_name,
-        )
-        return _fallback_staff_greeting(event, language)
-    return greeting
 
 
 def _normalize_greeting_text(value: str) -> Optional[str]:
