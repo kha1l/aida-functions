@@ -143,8 +143,8 @@ async def report_job_runtime(
         finally:
             dodo_api.reset_runtime()
             dodo_api.clear_account_token_cache()
-            if greeting_ai is not None:
-                greeting_ai.reset_runtime()
+            if ai_client is not None:
+                ai_client.reset_runtime()
             rabbitmq_close = getattr(rabbitmq, "close_async", None)
             if callable(rabbitmq_close):
                 await rabbitmq_close()
