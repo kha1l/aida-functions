@@ -113,8 +113,13 @@ dagster job execute -m defs -j couriers_job
 - `DODO_API_TIMEOUT_SECONDS`
 - `DODO_API_RETRIES_500`
 - `DODO_API_MAX_CONCURRENT_REQUESTS`
+- `DODOVKUS_TOKEN_DECRYPT_URL`
+- `DODOVKUS_TOKEN_AUTH_TIMEOUT_SECONDS`
+- `DODOVKUS_TOKEN_AUTH_TRUST_ENV`
 
-Токены и `account.properties` читаются из БД.
+Токены и `account.properties` читаются из БД. Dodo-токены в БД хранятся
+зашифрованными, поэтому перед запросами к Dodo API сервис дешифрует их через
+`dodovkus/auth/decrypt-tokens/`.
 
 ### Pyrus
 

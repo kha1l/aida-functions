@@ -9,9 +9,11 @@ from typing import TYPE_CHECKING, Awaitable, Callable, Iterable, Optional, Tuple
 
 from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
+from sqlalchemy.orm import selectinload
 
 from database.models import Account, Token, Orders, Unit, Subscribe, Franchisee, Settings, User
 from functions.shared.i18n import normalize_language
+from resources.token_auth import token_auth_client
 
 if TYPE_CHECKING:
     from resources.database import DatabaseResource
@@ -109,6 +111,7 @@ async def load_account_and_token(
 
             token_stmt = (
                 select(Token)
+                .options(selectinload(Token.application))
                 .where(
                     Token.account_id == account_id,
                     Token.application_id == TOKEN_APPLICATION_ID,
@@ -119,11 +122,14 @@ async def load_account_and_token(
             token = (await session.execute(token_stmt)).scalar_one_or_none()
             return account, token
 
-    return await _run_with_retry(
+    account, token = await _run_with_retry(
         operation_name="load_account_and_token",
         context=f"account_id={account_id}",
         action=_action,
     )
+    if token is not None:
+        await token_auth_client().decrypt_tokens([token])
+    return account, token
 
 
 @dataclass(frozen=True)
@@ -644,6 +650,7 @@ async def load_accounts_and_tokens_bulk(
 
             token_stmt = (
                 select(Token)
+                .options(selectinload(Token.application))
                 .join(ranked_tokens, Token.id == ranked_tokens.c.token_id)
                 .where(ranked_tokens.c.rn == 1)
             )
@@ -664,8 +671,15 @@ async def load_accounts_and_tokens_bulk(
                 for account_id in account_id_list
             }
 
-    return await _run_with_retry(
+    result = await _run_with_retry(
         operation_name="load_accounts_and_tokens_bulk",
         context=f"account_ids={len(account_id_list)}",
         action=_action,
     )
+    tokens_to_decrypt = [
+        token
+        for _account, token in result.values()
+        if token is not None
+    ]
+    await token_auth_client().decrypt_tokens(tokens_to_decrypt)
+    return result

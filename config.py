@@ -206,12 +206,33 @@ class DodoApiSettings:
     max_concurrent_requests: int
 
 
+@dataclass(frozen=True)
+class DodovkusTokenAuthSettings:
+    """Настройки сервиса дешифрования Dodo-токенов."""
+
+    decrypt_url: str
+    timeout_seconds: int
+    trust_env: bool
+
+
 def dodo_api_settings() -> DodoApiSettings:
     """Собирает настройки Dodo API из env."""
     return DodoApiSettings(
         timeout_seconds=_env_int("DODO_API_TIMEOUT_SECONDS", 30),
         retries_500=_env_int("DODO_API_RETRIES_500", 3),
         max_concurrent_requests=_env_int("DODO_API_MAX_CONCURRENT_REQUESTS", 10),
+    )
+
+
+def dodovkus_token_auth_settings() -> DodovkusTokenAuthSettings:
+    """Собирает настройки endpoint'а dodovkus/auth для дешифрования токенов."""
+    return DodovkusTokenAuthSettings(
+        decrypt_url=(
+            _env("DODOVKUS_TOKEN_DECRYPT_URL", "https://dodovkus.ru/auth/decrypt-tokens/")
+            or "https://dodovkus.ru/auth/decrypt-tokens/"
+        ),
+        timeout_seconds=_env_int("DODOVKUS_TOKEN_AUTH_TIMEOUT_SECONDS", 30),
+        trust_env=_env_bool("DODOVKUS_TOKEN_AUTH_TRUST_ENV", True),
     )
 
 
