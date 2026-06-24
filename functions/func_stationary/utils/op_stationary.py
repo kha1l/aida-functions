@@ -11,6 +11,11 @@ from typing import Dict, List, Optional, Set
 from dagster import OpExecutionContext
 from functions.shared.manual_report_runtime import to_int
 from config import schedule_local_hours
+from functions.shared.daily_job_config import (
+    configured_report_date,
+    is_configured_run,
+    select_configured_unit_uuids,
+)
 from functions.shared.report_job_runtime import (
     load_report_job_snapshot,
     log_auth_error,
@@ -20,7 +25,7 @@ from functions.shared.report_job_runtime import (
 )
 
 from database.requests import select_report_subscriptions
-from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
+from functions.shared.unit_time import build_report_local_day_window, resolve_unit_now
 
 PAGE_SIZE = 500
 MAX_CONCURRENT_UNITS = 15
@@ -69,15 +74,27 @@ async def run_stationary(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_UNITS)
     publish_lock = asyncio.Lock()
-    unit_uuids = [
-        unit_uuid
-        for unit_uuid in snapshot.subs_by_unit.keys()
-        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
-    ]
-    if not unit_uuids:
-        context.log.info(
-            "stationary_op: нет точек на локальные часы из SCHEDULE_STATIONARY_HOURS",
+    configured_run = is_configured_run(context)
+    report_date = configured_report_date(context)
+    if configured_run:
+        unit_uuids = select_configured_unit_uuids(
+            context,
+            available_unit_uuids=snapshot.subs_by_unit.keys(),
+            log_prefix="stationary_op",
         )
+    else:
+        unit_uuids = [
+            unit_uuid
+            for unit_uuid in snapshot.subs_by_unit.keys()
+            if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+        ]
+    if not unit_uuids:
+        if configured_run:
+            context.log.info("stationary_op: нет точек для заданных параметров запуска")
+        else:
+            context.log.info(
+                "stationary_op: нет точек на локальные часы из SCHEDULE_STATIONARY_HOURS",
+            )
         return
 
     async with report_job_runtime(dodo_api, rabbitmq):
@@ -107,6 +124,7 @@ async def run_stationary(context: OpExecutionContext) -> None:
                         unit_uuid=unit_uuid,
                         unit_name=unit_name,
                         account_id=account_id,
+                        report_date=report_date,
                     )
                     if last_error_html is None and last_error_status == 200:
                         successful_lookup = True
@@ -153,8 +171,9 @@ async def _build_stationary_report(
     unit_uuid: str,
     unit_name: str,
     account_id: int,
+    report_date: Optional[object] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
-    dt_start, dt_end = build_previous_local_day_window(unit)
+    dt_start, dt_end = build_report_local_day_window(unit, report_date)
     date_label = dt_start.strftime("%d.%m")
 
     params_base = {
@@ -233,8 +252,6 @@ async def _fetch_stationary_sales_stats(
                 continue
 
             sales_channel = str(sale.get("salesChannel") or "").strip()
-            # Базой для restaurant-отчета считаем только Dine-in продажи,
-            # а киоск нужен как отдельный подблок внутри отчета.
             if sales_channel == "Dine-in":
                 order_ids.add(order_key)
 
@@ -251,13 +268,12 @@ async def _fetch_stationary_sales_stats(
                 if not isinstance(product, dict):
                     continue
                 product_price = _to_decimal(product.get("priceWithDiscount"))
-                if order_source == "Dine-in":
+                if sales_channel == "Dine-in":
                     revenue_total += product_price
+                if order_source == "Dine-in":
                     if product.get("combo") is not None:
                         dine_in_combo_revenue_total += product_price
                 elif order_source == "Kiosk" and product.get("combo") is not None:
-                    # Выручку киоска в общий total не включаем, но отдельно
-                    # показываем ее продуктовые продажи в блоке про киоск.
                     kiosk_combo_revenue_total += product_price
 
                 for ingredient in product.get("addedIngredients", []) or []:

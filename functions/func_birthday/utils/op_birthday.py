@@ -12,6 +12,11 @@ from dagster import OpExecutionContext
 
 from config import schedule_local_hours
 from database.requests import select_report_subscriptions
+from functions.shared.daily_job_config import (
+    configured_report_date,
+    is_configured_run,
+    select_configured_unit_uuids,
+)
 from functions.shared.report_job_runtime import (
     load_report_job_snapshot,
     log_auth_error,
@@ -21,7 +26,7 @@ from functions.shared.report_job_runtime import (
 )
 from functions.shared.greeting_utils import normalize_single_sentence_greeting_html
 from functions.shared.i18n import is_english, pick
-from functions.shared.unit_time import resolve_unit_now, resolve_unit_today
+from functions.shared.unit_time import resolve_report_local_date, resolve_unit_now
 
 MAX_CONCURRENT_UNITS = 15
 STAFF_MEMBERS_TAKE = 990
@@ -57,15 +62,27 @@ async def run_birthday(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_UNITS)
     publish_lock = asyncio.Lock()
-    unit_uuids = [
-        unit_uuid
-        for unit_uuid in snapshot.subs_by_unit.keys()
-        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
-    ]
-    if not unit_uuids:
-        context.log.info(
-            "birthday_op: нет точек на локальные часы из SCHEDULE_BIRTHDAY_HOURS",
+    configured_run = is_configured_run(context)
+    report_date = configured_report_date(context)
+    if configured_run:
+        unit_uuids = select_configured_unit_uuids(
+            context,
+            available_unit_uuids=snapshot.subs_by_unit.keys(),
+            log_prefix="birthday_op",
         )
+    else:
+        unit_uuids = [
+            unit_uuid
+            for unit_uuid in snapshot.subs_by_unit.keys()
+            if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+        ]
+    if not unit_uuids:
+        if configured_run:
+            context.log.info("birthday_op: нет точек для заданных параметров запуска")
+        else:
+            context.log.info(
+                "birthday_op: нет точек на локальные часы из SCHEDULE_BIRTHDAY_HOURS",
+            )
         return
 
     async with report_job_runtime(dodo_api, rabbitmq, ai_client=ai_client):
@@ -87,7 +104,10 @@ async def run_birthday(context: OpExecutionContext) -> None:
                 last_error_html: Optional[str] = None
                 last_error_status: Optional[int] = None
                 successful_lookup = False
-                local_today = resolve_unit_today(unit)
+                local_today = resolve_report_local_date(
+                    unit,
+                    report_date,
+                )
 
                 for account_id in candidate_accounts:
                     report_texts, last_error_html, last_error_status = await _build_birthday_report(

@@ -13,7 +13,12 @@ from functions.shared.report_job_runtime import (
     log_final_unit_error,
     publish_report_to_subscribers,
 )
-from functions.shared.unit_time import build_previous_local_day_window, resolve_unit_now
+from functions.shared.daily_job_config import (
+    configured_report_date,
+    is_configured_run,
+    select_configured_unit_uuids,
+)
+from functions.shared.unit_time import build_report_local_day_window, resolve_unit_now
 
 from config import couriers_settings, WeatherSettings, schedule_local_hours, weather_settings
 from database.requests import select_couriers_subscriptions
@@ -42,15 +47,27 @@ async def run_couriers(context: OpExecutionContext) -> None:
 
     semaphore = asyncio.Semaphore(couriers_cfg.max_concurrent_units)
     publish_lock = asyncio.Lock()
-    unit_uuids = [
-        unit_uuid
-        for unit_uuid in snapshot.subs_by_unit.keys()
-        if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
-    ]
-    if not unit_uuids:
-        context.log.info(
-            "couriers_op: нет точек на локальные часы из SCHEDULE_COURIERS_HOURS",
+    configured_run = is_configured_run(context)
+    report_date = configured_report_date(context)
+    if configured_run:
+        unit_uuids = select_configured_unit_uuids(
+            context,
+            available_unit_uuids=snapshot.subs_by_unit.keys(),
+            log_prefix="couriers_op",
         )
+    else:
+        unit_uuids = [
+            unit_uuid
+            for unit_uuid in snapshot.subs_by_unit.keys()
+            if resolve_unit_now(snapshot.unit_for(unit_uuid)).hour in TRIGGER_HOURS
+        ]
+    if not unit_uuids:
+        if configured_run:
+            context.log.info("couriers_op: нет точек для заданных параметров запуска")
+        else:
+            context.log.info(
+                "couriers_op: нет точек на локальные часы из SCHEDULE_COURIERS_HOURS",
+            )
         return
 
     # Кеш погоды общий на весь job, чтобы несколько чатов одной точки не дублировали запрос.
@@ -129,6 +146,7 @@ async def run_couriers(context: OpExecutionContext) -> None:
                                 account.properties if account else None
                             ),
                             weather_text=weather_text,
+                            report_date=report_date,
                         )
                         if report_text:
                             break
@@ -184,9 +202,10 @@ async def _build_couriers_report(
     account_id: int,
     market_code: Optional[str],
     weather_text: str,
+    report_date: Optional[object] = None,
 ) -> tuple[Optional[str], Optional[str], Optional[int]]:
     """Собирает итоговый текст отчёта по доставке для одной точки."""
-    dt_start, dt_end = build_previous_local_day_window(unit)
+    dt_start, dt_end = build_report_local_day_window(unit, report_date)
     date_label = dt_start.strftime("%d.%m")
 
     params_base = {

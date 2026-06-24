@@ -3,6 +3,8 @@ import asyncio
 
 from dagster import Field, OpExecutionContext, op
 
+from functions.shared.daily_job_config import DAILY_REPORT_CONFIG_SCHEMA
+
 from .utils.op_drink_rest import run_drink_rest
 from .utils.op_assembly_rest import run_assembly_rest
 from .utils.op_later_rest import run_later_rest
@@ -24,7 +26,10 @@ MANUAL_STATIONARY_DRINK_REPORT_CONFIG = {
 }
 
 
-@op(required_resource_keys={"db", "rabbitmq", "dodo_api"})
+@op(
+    required_resource_keys={"db", "rabbitmq", "dodo_api"},
+    config_schema=DAILY_REPORT_CONFIG_SCHEMA,
+)
 def stationary_op(context: OpExecutionContext):
     """Собирает отчет по ресторану и отправляет его в RabbitMQ."""
     asyncio.run(run_stationary(context))

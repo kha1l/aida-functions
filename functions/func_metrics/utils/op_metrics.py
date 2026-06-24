@@ -705,8 +705,9 @@ def _extract_handover_stats(data: Dict[str, object]) -> MetricsHandoverStats:
             if meeting_time > LONG_DINE_IN_THRESHOLD_SECONDS:
                 dine_in_long_orders_count += 1
         elif sales_channel == "Delivery":
+            meeting_time = tracking_pending + cooking_time
             delivery_orders_count += 1
-            delivery_total_cooking_seconds += cooking_time
+            delivery_total_cooking_seconds += meeting_time
 
     return MetricsHandoverStats(
         dine_in_orders_count=dine_in_orders_count,
