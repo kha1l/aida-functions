@@ -13,7 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from database.models import Account, Token, Orders, Unit, Subscribe, Franchisee, Settings, User
 from functions.shared.i18n import normalize_language
-from resources.token_auth import token_auth_client
+from token_auth import token_auth_client
 
 if TYPE_CHECKING:
     from resources.database import DatabaseResource
