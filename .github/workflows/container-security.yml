@@ -53,15 +53,26 @@ jobs:
           docker image inspect "${IMAGE_REF}" \
             > security-reports/container-image-metadata.json
 
-      - name: Compile all Python modules in built image
+      - name: Verify runtime and compile Python modules
         id: test
         if: steps.build.outcome == 'success'
         continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
+          docker run --rm \
+            "${IMAGE_REF}" \
+            sh -eu -c '
+              test "$(id -u)" = "10001"
+              test -n "${DAGSTER_HOME}"
+              test -d "${DAGSTER_HOME}"
+              test -w "${DAGSTER_HOME}"
+              probe="${DAGSTER_HOME}/.write-probe"
+              : > "${probe}"
+              rm -f "${probe}"
+            '
           docker run --rm "${IMAGE_REF}" python -m compileall -q .
-          echo "Python module compilation completed." \
+          echo "Runtime directory and Python module checks completed." \
             | tee security-reports/container-tests.txt
 
       - name: Scan exact built image

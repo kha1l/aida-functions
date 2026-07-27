@@ -89,6 +89,10 @@ dagster dev -m defs
 dagster job execute -m defs -j couriers_job
 ```
 
+Production-образ работает под UID/GID `10001` и содержит доступный для записи
+`DAGSTER_HOME=/opt/dagster/dagster_home`, который Dagster использует для
+локального хранения служебных файлов выполнения.
+
 ## Основные переменные окружения
 
 ### PostgreSQL

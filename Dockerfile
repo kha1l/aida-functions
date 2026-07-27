@@ -1,11 +1,12 @@
 FROM python:3.14-slim@sha256:cea0e6040540fb2b965b6e7fb5ffa00871e632eef63719f0ea54bca189ce14a6
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    DAGSTER_HOME=/opt/dagster/dagster_home
 
 RUN groupadd --gid 10001 appuser \
  && useradd --uid 10001 --gid appuser --create-home --no-log-init appuser \
- && install -d -o appuser -g appuser /app
+ && install -d -o appuser -g appuser /app /opt/dagster/dagster_home
 
 WORKDIR /app
 
