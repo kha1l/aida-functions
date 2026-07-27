@@ -1,0 +1,537 @@
+name: Security
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "56 1 * * 1"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  AITRIAGE_VERSION: "1.9.4"
+  AITRIAGE_LINUX_X86_64_SHA256: "dbda4170ada65d45d9183c846f44ca4b2d62d595265331e57e23b53cea6ac977"
+  SEMGREP_IMAGE: "semgrep/semgrep:1.170.1@sha256:98c2572fced2474539fd27cab3207ebd8e95e4e7aab4c3b381fdc5e2641d9941"
+  SEMGREP_RULES_COMMIT: "647d58eb2e085440618782963ff094178d98d2fe"
+  GITLEAKS_IMAGE: "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f"
+  TRIVY_IMAGE: "aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+
+jobs:
+  aitriage:
+    name: Security / AITriage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Install verified AITriage release
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          archive_name="aitriage_${AITRIAGE_VERSION}_Linux_x86_64.tar.gz"
+          archive_path="${RUNNER_TEMP}/${archive_name}"
+          install_dir="${RUNNER_TEMP}/aitriage-${AITRIAGE_VERSION}"
+          curl --proto '=https' --tlsv1.2 --fail --location --silent --show-error \
+            "https://github.com/cybertortuga/aitriage/releases/download/v${AITRIAGE_VERSION}/${archive_name}" \
+            --output "${archive_path}"
+          echo "${AITRIAGE_LINUX_X86_64_SHA256}  ${archive_path}" | sha256sum --check -
+          mkdir -p "${install_dir}"
+          tar -xzf "${archive_path}" -C "${install_dir}"
+          aitriage_bin="$(find "${install_dir}" -type f -name aitriage -print -quit)"
+          test -n "${aitriage_bin}"
+          chmod +x "${aitriage_bin}"
+          echo "AITRIAGE_BIN=${aitriage_bin}" >> "${GITHUB_ENV}"
+          "${aitriage_bin}" version | tee security-reports/aitriage-version.txt
+
+      - name: Run deterministic AITriage gate
+        id: aitriage_scan
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${AITRIAGE_BIN}" scan . \
+            --format sarif \
+            --out security-reports/aitriage.sarif \
+            --no-history \
+            --no-summary
+
+      - name: Generate AITriage CycloneDX SBOM
+        id: aitriage_sbom
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          "${AITRIAGE_BIN}" sbom . \
+            --format cyclonedx \
+            --output security-reports/aitriage-sbom.cdx.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("security-reports/aitriage-sbom.cdx.json")
+          report = json.loads(path.read_text(encoding="utf-8"))
+          repository = os.environ["GITHUB_REPOSITORY"]
+          commit_sha = os.environ["GITHUB_SHA"]
+          metadata = report.setdefault("metadata", {})
+          metadata["component"] = {
+              "type": "application",
+              "name": repository.rsplit("/", 1)[-1],
+              "version": commit_sha,
+          }
+          metadata["properties"] = [
+              {"name": "vcs:git:commit", "value": commit_sha},
+              {"name": "vcs:git:repository", "value": repository},
+          ]
+          path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+          PY
+
+      - name: Upload AITriage evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: aitriage-reports
+          path: security-reports/aitriage*
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce AITriage result
+        if: always()
+        shell: bash
+        env:
+          AITRIAGE_SCAN_OUTCOME: ${{ steps.aitriage_scan.outcome }}
+          AITRIAGE_SBOM_OUTCOME: ${{ steps.aitriage_sbom.outcome }}
+        run: |
+          test "${AITRIAGE_SCAN_OUTCOME}" = "success"
+          test "${AITRIAGE_SBOM_OUTCOME}" = "success"
+          test -s security-reports/aitriage.sarif
+          test -s security-reports/aitriage-sbom.cdx.json
+
+  semgrep:
+    name: Security / Semgrep
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      SEMGREP_CONFIG_PATHS: "python dockerfile yaml/github-actions"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout pinned Semgrep rules
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: semgrep/semgrep-rules
+          ref: ${{ env.SEMGREP_RULES_COMMIT }}
+          path: .semgrep-rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Create Semgrep SARIF
+        id: semgrep_report
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          docker run --rm "${SEMGREP_IMAGE}" semgrep --version             | tee security-reports/semgrep-version.txt
+          config_args=()
+          for config_path in ${SEMGREP_CONFIG_PATHS}; do
+            config_args+=(--config "/src/.semgrep-rules/${config_path}")
+          done
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/src" \
+            --workdir /src \
+            "${SEMGREP_IMAGE}" \
+            semgrep scan \
+            "${config_args[@]}" \
+            --metrics=off \
+            --disable-version-check \
+            --jobs 2 \
+            --max-target-bytes 1000000 \
+            --exclude .git \
+            --exclude .semgrep-rules \
+            --exclude .venv \
+            --exclude venv \
+            --exclude node_modules \
+            --exclude dist \
+            --exclude build \
+            --exclude security-reports \
+            --sarif \
+            --output /src/security-reports/semgrep.sarif \
+            /src
+
+      - name: Enforce Semgrep security ERROR findings
+        id: semgrep_gate
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_args=()
+          for config_path in ${SEMGREP_CONFIG_PATHS}; do
+            config_args+=(--config "/src/.semgrep-rules/${config_path}")
+          done
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/src" \
+            --workdir /src \
+            "${SEMGREP_IMAGE}" \
+            semgrep scan \
+            "${config_args[@]}" \
+            --metrics=off \
+            --disable-version-check \
+            --jobs 2 \
+            --max-target-bytes 1000000 \
+            --exclude .git \
+            --exclude .semgrep-rules \
+            --exclude .venv \
+            --exclude venv \
+            --exclude node_modules \
+            --exclude dist \
+            --exclude build \
+            --exclude security-reports \
+            --severity ERROR \
+            --quiet \
+            --json \
+            --output /src/security-reports/semgrep-gate.json \
+            /src
+
+          python - <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          report = json.loads(Path('security-reports/semgrep-gate.json').read_text())
+          findings = [
+              result for result in report.get('results', [])
+              if result.get('extra', {}).get('severity') == 'ERROR'
+              and result.get('extra', {}).get('metadata', {}).get('category') == 'security'
+          ]
+          for finding in findings:
+              print(f"{finding.get('check_id')} at {finding.get('path')}:{finding.get('start', {}).get('line')}")
+          if findings:
+              sys.exit(1)
+          PY
+
+      - name: Upload Semgrep evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: semgrep-reports
+          path: security-reports/semgrep*
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce Semgrep result
+        if: always()
+        shell: bash
+        env:
+          SEMGREP_REPORT_OUTCOME: ${{ steps.semgrep_report.outcome }}
+          SEMGREP_GATE_OUTCOME: ${{ steps.semgrep_gate.outcome }}
+        run: |
+          test "${SEMGREP_REPORT_OUTCOME}" = "success"
+          test "${SEMGREP_GATE_OUTCOME}" = "success"
+          test -s security-reports/semgrep.sarif
+
+  gitleaks:
+    name: Security / Gitleaks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout complete history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Scan Git history with redaction
+        id: gitleaks_scan
+        continue-on-error: true
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          docker run --rm "${GITLEAKS_IMAGE}" version             | tee security-reports/gitleaks-version.txt
+          scan_args=(
+            git /repo
+            --redact=100
+            --report-format sarif
+            --report-path /repo/security-reports/gitleaks.sarif
+            --exit-code 1
+            --no-banner
+          )
+          if [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            scan_args+=(--log-opts "${BASE_SHA}..${HEAD_SHA}")
+          fi
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo" \
+            --workdir /repo \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/repo \
+            "${GITLEAKS_IMAGE}" \
+            "${scan_args[@]}"
+
+      - name: Upload Gitleaks evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gitleaks-reports
+          path: security-reports/gitleaks*
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce Gitleaks result
+        if: always()
+        shell: bash
+        env:
+          GITLEAKS_SCAN_OUTCOME: ${{ steps.gitleaks_scan.outcome }}
+        run: |
+          test "${GITLEAKS_SCAN_OUTCOME}" = "success"
+          test -s security-reports/gitleaks.sarif
+
+  trivy:
+    name: Security / Trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Scan dependencies
+        id: trivy_fs
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports "${RUNNER_TEMP}/trivy-cache"
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" --version \
+            | tee security-reports/trivy-version.txt
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo" \
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format sarif \
+            --output /repo/security-reports/trivy-filesystem.sarif \
+            --skip-dirs .git \
+            --skip-dirs .venv \
+            --skip-dirs venv \
+            --skip-dirs node_modules \
+            --skip-dirs dist \
+            --skip-dirs build \
+            /repo
+
+      - name: Scan configuration
+        id: trivy_config
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo" \
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" config \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            --format sarif \
+            --output /repo/security-reports/trivy-configuration.sarif \
+            /repo
+
+      - name: Generate CycloneDX SBOM
+        id: trivy_sbom
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo" \
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" fs \
+            --scanners vuln \
+            --exit-code 0 \
+            --format cyclonedx \
+            --output /repo/security-reports/sbom.cdx.json \
+            --skip-dirs .git \
+            --skip-dirs .venv \
+            --skip-dirs venv \
+            --skip-dirs node_modules \
+            --skip-dirs dist \
+            --skip-dirs build \
+            /repo
+
+      - name: Record Trivy database metadata
+        id: trivy_database
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" version --format json \
+            > security-reports/trivy-database-version.json
+
+      - name: Upload Trivy evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trivy-reports
+          path: security-reports/
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Enforce Trivy result
+        if: always()
+        shell: bash
+        env:
+          TRIVY_FS_OUTCOME: ${{ steps.trivy_fs.outcome }}
+          TRIVY_CONFIG_OUTCOME: ${{ steps.trivy_config.outcome }}
+          TRIVY_SBOM_OUTCOME: ${{ steps.trivy_sbom.outcome }}
+          TRIVY_DATABASE_OUTCOME: ${{ steps.trivy_database.outcome }}
+        run: |
+          test "${TRIVY_FS_OUTCOME}" = "success"
+          test "${TRIVY_CONFIG_OUTCOME}" = "success"
+          test "${TRIVY_SBOM_OUTCOME}" = "success"
+          test "${TRIVY_DATABASE_OUTCOME}" = "success"
+          test -s security-reports/trivy-filesystem.sarif
+          test -s security-reports/trivy-configuration.sarif
+          test -s security-reports/sbom.cdx.json
+          test -s security-reports/trivy-database-version.json
+
+  evidence:
+    name: Security / Evidence
+    if: always()
+    needs:
+      - aitriage
+      - semgrep
+      - gitleaks
+      - trivy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download scanner artifacts
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0
+        with:
+          path: evidence/artifacts
+
+      - name: Create evidence manifest
+        if: always()
+        shell: bash
+        env:
+          AITRIAGE_RESULT: ${{ needs.aitriage.result }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
+          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          root = Path("evidence/artifacts")
+          files = []
+          if root.exists():
+              for path in sorted(p for p in root.rglob("*") if p.is_file()):
+                  digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                  files.append({
+                      "path": path.as_posix(),
+                      "bytes": path.stat().st_size,
+                      "sha256": digest,
+                  })
+
+          manifest = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "commit_sha": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "tools": {
+                  "aitriage": "1.9.4",
+                  "semgrep": "1.170.1",
+                  "semgrep_rules": "647d58eb2e085440618782963ff094178d98d2fe",
+                  "gitleaks": "8.30.1",
+                  "trivy": "0.72.0",
+              },
+              "checks": {
+                  "aitriage": os.environ["AITRIAGE_RESULT"],
+                  "semgrep": os.environ["SEMGREP_RESULT"],
+                  "gitleaks": os.environ["GITLEAKS_RESULT"],
+                  "trivy": os.environ["TRIVY_RESULT"],
+              },
+              "related_evidence": {
+                  "container": {
+                      "workflow": "Security / Build, test and image",
+                      "correlation_key": os.environ["GITHUB_SHA"],
+                  },
+              },
+              "artifacts": files,
+          }
+          Path("evidence/manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload audit evidence bundle
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: audit-evidence
+          path: evidence/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce aggregate result
+        if: always()
+        shell: bash
+        env:
+          AITRIAGE_RESULT: ${{ needs.aitriage.result }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
+          GITLEAKS_RESULT: ${{ needs.gitleaks.result }}
+          TRIVY_RESULT: ${{ needs.trivy.result }}
+        run: |
+          set -euo pipefail
+          test "${{ steps.download.outcome }}" = "success"
+          test "${AITRIAGE_RESULT}" = "success"
+          test "${SEMGREP_RESULT}" = "success"
+          test "${GITLEAKS_RESULT}" = "success"
+          test "${TRIVY_RESULT}" = "success"

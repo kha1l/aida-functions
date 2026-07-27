@@ -17,6 +17,13 @@ def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     return value
 
 
+def _require_env(name: str) -> str:
+    value = _env(name)
+    if value is None or not value.strip():
+        raise RuntimeError(f"Required environment variable is missing: {name}")
+    return value
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     """Читает булево значение из env (1/true/yes/y/on)."""
     value = os.getenv(name)
@@ -129,7 +136,7 @@ class RabbitMQSettings:
 def rabbitmq_settings() -> RabbitMQSettings:
     """Собирает настройки RabbitMQ из env."""
     return RabbitMQSettings(
-        url=_env("RABBIT_URL", "amqp://guest:guest@localhost:5672/"),
+        url=_require_env("RABBIT_URL"),
         queue=_env("RABBIT_QUEUE", "aida"),
         max_queue=_env("RABBIT_QUEUE_MAX", "aida-max"),
         exchange=_env("RABBIT_EXCHANGE", ""),
@@ -210,6 +217,7 @@ class DodoApiSettings:
 class DodovkusTokenAuthSettings:
     """Настройки сервиса дешифрования Dodo-токенов."""
 
+    default_service_key: str
     decrypt_url: str
     timeout_seconds: int
     trust_env: bool
@@ -227,6 +235,7 @@ def dodo_api_settings() -> DodoApiSettings:
 def dodovkus_token_auth_settings() -> DodovkusTokenAuthSettings:
     """Собирает настройки endpoint'а dodovkus/auth для дешифрования токенов."""
     return DodovkusTokenAuthSettings(
+        default_service_key=_require_env("DODOVKUS_TOKEN_AUTH_DEFAULT_SERVICE_KEY"),
         decrypt_url=(
             _env("DODOVKUS_TOKEN_DECRYPT_URL", "https://dodovkus.ru/auth/decrypt-tokens/")
             or "https://dodovkus.ru/auth/decrypt-tokens/"

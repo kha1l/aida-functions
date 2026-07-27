@@ -1,7 +1,11 @@
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:57cd7c3a7a273101a6485ba99423ee568157882804b1124b4dd04266317710de
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
+
+RUN groupadd --gid 10001 appuser \
+ && useradd --uid 10001 --gid appuser --create-home --no-log-init appuser \
+ && install -d -o appuser -g appuser /app
 
 WORKDIR /app
 
@@ -19,7 +23,9 @@ PY
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY --chown=appuser:appuser . .
+
+USER appuser
 
 EXPOSE 4000
 

@@ -1,0 +1,220 @@
+name: Security / Build, test and image
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "49 2 * * 1"
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-container-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  TRIVY_IMAGE: "aquasec/trivy:0.72.0@sha256:cffe3f5161a47a6823fbd23d985795b3ed72a4c806da4c4df16266c02accdd6f"
+  IMAGE_REPOSITORY: "ghcr.io/dev-do-dodo/aida_functions"
+  IMAGE_REF: "ghcr.io/dev-do-dodo/aida_functions:${{ github.sha }}"
+
+jobs:
+  container:
+    name: Security / Build, test and image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build application image
+        id: build
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports "${RUNNER_TEMP}/trivy-cache"
+          docker build \
+            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
+            --tag "${IMAGE_REF}" \
+            .
+          docker image inspect "${IMAGE_REF}" \
+            > security-reports/container-image-metadata.json
+
+      - name: Compile all Python modules in built image
+        id: test
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm "${IMAGE_REF}" python -m compileall -q .
+          echo "Python module compilation completed." \
+            | tee security-reports/container-tests.txt
+
+      - name: Scan exact built image
+        id: image_scan
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          trivy=(docker run --rm
+            --volume /var/run/docker.sock:/var/run/docker.sock
+            --volume "${GITHUB_WORKSPACE}/security-reports:/reports"
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy"
+            "${TRIVY_IMAGE}" image)
+          "${trivy[@]}" \
+            --severity HIGH,CRITICAL --exit-code 0 \
+            --format sarif --output /reports/trivy-container.sarif \
+            "${IMAGE_REF}"
+          "${trivy[@]}" \
+            --exit-code 0 --format cyclonedx \
+            --output /reports/container-sbom.cdx.json \
+            "${IMAGE_REF}"
+          docker run --rm \
+            --volume "${RUNNER_TEMP}/trivy-cache:/root/.cache/trivy" \
+            "${TRIVY_IMAGE}" version --format json \
+            > security-reports/trivy-container-database.json
+          "${trivy[@]}" \
+            --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 \
+            --format json --output /reports/trivy-container-gate.json \
+            "${IMAGE_REF}"
+
+      - name: Create container evidence manifest
+        if: always()
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          IMAGE_SCAN_OUTCOME: ${{ steps.image_scan.outcome }}
+        run: |
+          set -euo pipefail
+          mkdir -p security-reports
+          python3 - <<'PY'
+          import hashlib, json, os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          root = Path("security-reports")
+          files = []
+          for path in sorted(p for p in root.rglob("*") if p.is_file()):
+              if path.name == "container-manifest.json":
+                  continue
+              files.append({
+                  "path": path.relative_to(root).as_posix(),
+                  "bytes": path.stat().st_size,
+                  "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+              })
+          manifest = {
+              "schema_version": 1,
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "commit_sha": os.environ["GITHUB_SHA"],
+              "ref": os.environ["GITHUB_REF"],
+              "event": os.environ["GITHUB_EVENT_NAME"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "generated_at": datetime.now(timezone.utc).isoformat(),
+              "image": os.environ["IMAGE_REF"],
+              "scanner_image": os.environ["TRIVY_IMAGE"],
+              "checks": {
+                  "build": os.environ["BUILD_OUTCOME"],
+                  "test": os.environ["TEST_OUTCOME"],
+                  "image_scan": os.environ["IMAGE_SCAN_OUTCOME"],
+              },
+              "artifacts": files,
+          }
+          (root / "container-manifest.json").write_text(
+              json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
+      - name: Upload container evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: container-security-reports
+          path: security-reports/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce build, test and image results
+        if: always()
+        shell: bash
+        env:
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          TEST_OUTCOME: ${{ steps.test.outcome }}
+          IMAGE_SCAN_OUTCOME: ${{ steps.image_scan.outcome }}
+        run: |
+          set -euo pipefail
+          test "${BUILD_OUTCOME}" = "success"
+          test "${TEST_OUTCOME}" = "success"
+          test "${IMAGE_SCAN_OUTCOME}" = "success"
+          test -s security-reports/container-image-metadata.json
+          test -s security-reports/container-tests.txt
+          test -s security-reports/trivy-container.sarif
+          test -s security-reports/trivy-container-gate.json
+          test -s security-reports/container-sbom.cdx.json
+          test -s security-reports/trivy-container-database.json
+          test -s security-reports/container-manifest.json
+
+      - name: Require successful scanner workflow for release
+        if: github.event_name == 'release'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          ACTIONS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          scanner_state="missing:"
+          for _ in {1..120}; do
+            response="$(curl --proto '=https' --tlsv1.2 \
+              --fail --silent --show-error \
+              --header "Authorization: Bearer ${ACTIONS_TOKEN}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/workflows/security.yml/runs?head_sha=${GITHUB_SHA}&event=release&per_page=10")"
+            scanner_state="$(python3 -c '
+          import json, sys
+          runs = json.load(sys.stdin).get("workflow_runs", [])
+          run = runs[0] if runs else {}
+          print("{}:{}".format(run.get("status", "missing"), run.get("conclusion") or ""))
+          ' <<<"${response}")"
+            case "${scanner_state}" in
+              completed:success) break ;;
+              completed:*) echo "Scanner workflow failed: ${scanner_state}"; exit 1 ;;
+              *) sleep 10 ;;
+            esac
+          done
+          test "${scanner_state}" = "completed:success"
+
+      - name: Publish exact scanned release image
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          safe_tag="$(printf '%s' "${RELEASE_TAG}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9_.-]+/-/g; s/^[.-]+//; s/[.-]+$//')"
+          test -n "${safe_tag}"
+          printf '%s' "${GHCR_TOKEN}" \
+            | docker login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
+          docker push "${IMAGE_REF}"
+          docker tag "${IMAGE_REF}" "${IMAGE_REPOSITORY}:${safe_tag}"
+          docker push "${IMAGE_REPOSITORY}:${safe_tag}"

@@ -1,0 +1,32 @@
+# Deterministic AITriage policy. Intentionally no llm section.
+ignore:
+  rules: []
+  paths:
+    - ".git/"
+    - ".venv/"
+    - "venv/"
+    - ".certs/"
+    - ".tools/"
+    - "__pycache__/"
+    - ".pytest_cache/"
+    - "node_modules/"
+    - "vendor/"
+    - "dist/"
+    - "build/"
+    - "coverage/"
+    - "aitriage-reports/"
+    - "security-reports/"
+    - ".semgrep-rules/"
+
+health_check:
+  profile: standard
+  fail_on: critical
+  minimum_score: 70
+  max_critical: 0
+  max_high: 0
+  max_medium: -1
+  block_sources: []
+  block_classes: []
+
+strict_mode: false
+fail_score: 0
