@@ -106,7 +106,7 @@ jobs:
 
       - name: Upload AITriage evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: aitriage-reports
           path: security-reports/aitriage*
@@ -234,7 +234,7 @@ jobs:
 
       - name: Upload Semgrep evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: semgrep-reports
           path: security-reports/semgrep*
@@ -297,7 +297,7 @@ jobs:
 
       - name: Upload Gitleaks evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: gitleaks-reports
           path: security-reports/gitleaks*
@@ -403,7 +403,7 @@ jobs:
 
       - name: Upload Trivy evidence
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: trivy-reports
           path: security-reports/
@@ -513,7 +513,7 @@ jobs:
 
       - name: Upload audit evidence bundle
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
           name: audit-evidence
           path: evidence/
