@@ -15,6 +15,7 @@ import aiohttp
 from dagster import Field, InitResourceContext, IntSource, StringSource, resource
 
 from config import zveno_settings
+from security_logging import safe_identifier
 
 
 @dataclass(frozen=True)
@@ -145,19 +146,19 @@ class ZvenoClient:
         if not result.ok or not result.text:
             if result.error_html:
                 log_warning(
-                    "%s: Zveno не сгенерировал поздравление для %s: %s",
+                    "%s: Zveno не сгенерировал поздравление для subject_hash=%s, status=%s",
                     log_prefix,
-                    subject,
-                    _html_to_log_text(result.error_html),
+                    safe_identifier(subject),
+                    result.status,
                 )
             return fallback()
 
         greeting = normalize(result.text)
         if greeting is None:
             log_warning(
-                "%s: Zveno вернул неожиданный формат поздравления для %s",
+                "%s: Zveno вернул неожиданный формат поздравления для subject_hash=%s",
                 log_prefix,
-                subject,
+                safe_identifier(subject),
             )
             return fallback()
         return greeting

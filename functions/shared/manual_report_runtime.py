@@ -16,6 +16,7 @@ from database.requests import load_accounts_and_tokens_bulk, load_chat_languages
 from functions.shared.report_text_i18n import translate_report_text
 from functions.shared.webapp_results import store_webapp_report_result
 from messaging import build_payload
+from security_logging import safe_identifier
 
 
 TELEGRAM_MESSAGE_LIMIT = 4096
@@ -382,25 +383,29 @@ def log_report_failure(
     if error_html:
         if error_status in {401, 403}:
             context.log.warning(
-                "%s: ошибка Dodo API для unit %s, account_id=%s: %s",
+                "%s: ошибка Dodo API для unit_hash=%s, account_hash=%s, status=%s",
                 log_prefix,
-                request.unit_uuid,
-                request.account_id,
-                html_to_log_text(error_html),
+                safe_identifier(request.unit_uuid),
+                safe_identifier(request.account_id),
+                error_status,
             )
         elif error_status in {429, 500}:
             context.log.error(
-                "%s: не удалось собрать отчет для unit %s после retry: %s",
+                "%s: не удалось собрать отчет для unit_hash=%s после retry, status=%s",
                 log_prefix,
-                request.unit_uuid,
-                html_to_log_text(error_html),
+                safe_identifier(request.unit_uuid),
+                error_status,
             )
         else:
             context.log.error(
-                "%s: не удалось собрать отчет для unit %s: %s",
+                "%s: не удалось собрать отчет для unit_hash=%s, status=%s",
                 log_prefix,
-                request.unit_uuid,
-                html_to_log_text(error_html),
+                safe_identifier(request.unit_uuid),
+                error_status,
             )
     else:
-        context.log.warning("%s: нет данных для unit %s", log_prefix, request.unit_uuid)
+        context.log.warning(
+            "%s: нет данных для unit_hash=%s",
+            log_prefix,
+            safe_identifier(request.unit_uuid),
+        )

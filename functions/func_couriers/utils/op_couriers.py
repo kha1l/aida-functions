@@ -180,7 +180,9 @@ async def run_couriers(context: OpExecutionContext) -> None:
                     )
                 except Exception as exc:  # noqa: BLE001
                     context.log.error(
-                        "couriers_op: ошибка обработки unit %s: %s", unit_uuid, exc
+                        "couriers_op: ошибка обработки unit %s, error_type=%s",
+                        unit_uuid,
+                        type(exc).__name__,
                     )
 
         try:
@@ -506,7 +508,10 @@ async def _build_weather_text(
             return formatted
         return _weather_unavailable_text("погодный сервис не вернул прогноз")
     except Exception as exc:  # noqa: BLE001
-        logger.warning("couriers_op: ошибка погоды для %s: %s", unit_name, exc)
+        logger.warning(
+            "couriers_op: ошибка погодного сервиса, error_type=%s",
+            type(exc).__name__,
+        )
         return _weather_unavailable_text("данные временно недоступны")
 
 

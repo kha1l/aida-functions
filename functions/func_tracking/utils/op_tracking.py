@@ -17,7 +17,7 @@ from database.requests import (
     load_units_by_uuids,
     select_account_ids_for_units,
 )
-from functions.shared.manual_report_runtime import html_to_log_text, split_text_for_telegram
+from functions.shared.manual_report_runtime import split_text_for_telegram
 from functions.shared.report_job_runtime import log_auth_error, report_job_runtime
 from functions.shared.report_text_i18n import translate_report_text
 from functions.shared.unit_time import resolve_unit_today
@@ -113,9 +113,9 @@ async def run_tracking(context: OpExecutionContext) -> None:
 
             if last_error_html and last_error_status not in {401, 403}:
                 context.log.error(
-                    "tracking_op: не удалось собрать трекинг для unit %s: %s",
+                    "tracking_op: не удалось собрать трекинг для unit %s, status=%s",
                     unit_uuid,
-                    html_to_log_text(last_error_html),
+                    last_error_status,
                 )
 
         if not report_blocks:

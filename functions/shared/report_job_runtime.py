@@ -17,11 +17,12 @@ from database.requests import (
     load_units_by_uuids,
     select_account_ids_for_units,
 )
-from functions.shared.manual_report_runtime import html_to_log_text, split_text_for_telegram
+from functions.shared.manual_report_runtime import split_text_for_telegram
 from functions.shared.i18n import normalize_language
 from functions.shared.report_text_i18n import translate_report_text
 from functions.shared.unit_time import resolve_unit_now
 from messaging import build_payload
+from security_logging import safe_identifier
 
 
 LoadSubscriptions = Callable[[object], Awaitable[List[ReportSubscription]]]
@@ -198,11 +199,11 @@ def log_auth_error(
     """Пишет в лог только те ошибки токена, на которые стоит смотреть сразу."""
     if error_html and error_status in {401, 403}:
         context.log.warning(
-            "%s: ошибка Dodo API для unit %s, account_id=%s: %s",
+            "%s: ошибка Dodo API для unit_hash=%s, account_hash=%s, status=%s",
             log_prefix,
-            unit_uuid,
-            account_id,
-            html_to_log_text(error_html),
+            safe_identifier(unit_uuid),
+            safe_identifier(account_id),
+            error_status,
         )
 
 
@@ -219,20 +220,25 @@ def log_final_unit_error(
     if error_html:
         if error_status in {429, 500}:
             context.log.error(
-                "%s: не удалось собрать отчет для unit %s после retry: %s",
+                "%s: не удалось собрать отчет для unit_hash=%s после retry, status=%s",
                 log_prefix,
-                unit_uuid,
-                html_to_log_text(error_html),
+                safe_identifier(unit_uuid),
+                error_status,
             )
         elif error_status not in {401, 403}:
             context.log.error(
-                "%s: не удалось собрать отчет для unit %s: %s",
+                "%s: не удалось собрать отчет для unit_hash=%s, status=%s",
                 log_prefix,
-                unit_uuid,
-                html_to_log_text(error_html),
+                safe_identifier(unit_uuid),
+                error_status,
             )
     elif empty_message:
-        context.log.warning("%s: %s для unit %s", log_prefix, empty_message, unit_uuid)
+        context.log.warning(
+            "%s: %s для unit_hash=%s",
+            log_prefix,
+            empty_message,
+            safe_identifier(unit_uuid),
+        )
 
 
 def resolve_target_local_hour(snapshot: ReportJobSnapshot, unit_uuid: str) -> int:

@@ -207,9 +207,9 @@ async def _collect_tickets_by_unit(
                 task = await pyrus.get_task(task_id)
             except Exception as exc:  # noqa: BLE001
                 context.log.warning(
-                    "tickets_op: не удалось прочитать task %s из Pyrus: %s",
+                    "tickets_op: не удалось прочитать task %s из Pyrus, error_type=%s",
                     task_id,
-                    exc,
+                    type(exc).__name__,
                 )
                 return None
         ticket = _parse_ticket(
@@ -420,11 +420,11 @@ async def _load_delivery_orders_for_date(
         )
         if not result.ok:
             context.log.warning(
-                "tickets_op: не удалось получить заказы курьеров для unit %s, account_id=%s, date=%s: %s",
+                "tickets_op: не удалось получить заказы курьеров для unit %s, account_id=%s, date=%s, status=%s",
                 unit_uuid,
                 account_id,
                 order_date,
-                result.error_html or result.status,
+                result.status,
             )
             cache[cache_key] = {}
             return cache[cache_key]

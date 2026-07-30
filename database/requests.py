@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 
 from database.models import Account, Token, Orders, Unit, Subscribe, Franchisee, Settings, User
 from functions.shared.i18n import normalize_language
+from security_logging import safe_identifier
 from token_auth import token_auth_client
 
 if TYPE_CHECKING:
@@ -41,24 +42,24 @@ async def _run_with_retry(
             last_error = exc
             if not _is_retryable_db_error(exc) or attempt >= DB_RETRY_ATTEMPTS:
                 LOGGER.exception(
-                    "db request failed: operation=%s context=%s attempt=%s/%s error=%s",
+                    "db request failed: operation=%s context_hash=%s attempt=%s/%s error_type=%s",
                     operation_name,
-                    context,
+                    safe_identifier(context),
                     attempt,
                     DB_RETRY_ATTEMPTS,
-                    exc,
+                    type(exc).__name__,
                 )
                 raise
 
             delay = _retry_delay(attempt)
             LOGGER.warning(
-                "db transient error: operation=%s context=%s attempt=%s/%s retry_in=%.1fs error=%s",
+                "db transient error: operation=%s context_hash=%s attempt=%s/%s retry_in=%.1fs error_type=%s",
                 operation_name,
-                context,
+                safe_identifier(context),
                 attempt,
                 DB_RETRY_ATTEMPTS,
                 delay,
-                exc,
+                type(exc).__name__,
             )
             await asyncio.sleep(delay)
 
