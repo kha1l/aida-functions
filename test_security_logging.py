@@ -6,7 +6,20 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from security_logging import pseudonymize, redact_text, safe_identifier
+from security_logging import (
+    SafeStructuredLogger,
+    build_structured_log,
+    pseudonymize,
+    redact_text,
+    safe_identifier,
+    safe_log_context,
+)
+
+try:
+    from dagster import job, op
+except ModuleNotFoundError:
+    job = None
+    op = None
 
 try:
     from functions.shared.report_job_runtime import log_auth_error
@@ -21,6 +34,98 @@ else:
 
 
 class SecurityLoggingTests(unittest.TestCase):
+    def test_structured_log_uses_allowlist_and_correlation_fields(self) -> None:
+        event = build_structured_log(
+            level="WARNING",
+            message="unit=%s Authorization: Bearer %s",
+            args=("987654321", "synthetic-secret"),
+            component="synthetic_op",
+            request_id="request-1",
+            trace_id="trace-1",
+        )
+
+        self.assertEqual(
+            set(event),
+            {
+                "timestamp",
+                "stream",
+                "level",
+                "message",
+                "service",
+                "version",
+                "component",
+                "request_id",
+                "trace_id",
+            },
+        )
+        self.assertEqual(event["request_id"], "request-1")
+        self.assertEqual(event["trace_id"], "trace-1")
+        self.assertNotIn("987654321", event["message"])
+        self.assertNotIn("synthetic-secret", event["message"])
+
+    def test_safe_context_emits_redacted_json_with_stable_trace(self) -> None:
+        messages: list[str] = []
+        delegate = SimpleNamespace(
+            info=messages.append,
+            warning=messages.append,
+            error=messages.append,
+        )
+        context = SimpleNamespace(
+            run_id="synthetic-run",
+            op=SimpleNamespace(name="synthetic_op"),
+            log=delegate,
+        )
+        safe_context = safe_log_context(context)
+        safe_context.log.warning(
+            "email=%s phone=%s",
+            "synthetic.employee@example.test",
+            "+7 (999) 123-45-67",
+        )
+
+        event = json.loads(messages[0])
+        self.assertEqual(event["component"], "synthetic_op")
+        self.assertRegex(event["request_id"], r"^[0-9a-f]{32}$")
+        self.assertRegex(event["trace_id"], r"^[0-9a-f]{32}$")
+        self.assertNotIn("synthetic.employee@example.test", messages[0])
+        self.assertNotIn("+7 (999) 123-45-67", messages[0])
+
+    def test_structured_logger_drops_unapproved_keyword_fields(self) -> None:
+        messages: list[str] = []
+        logger = SafeStructuredLogger(
+            SimpleNamespace(info=messages.append),
+            component="synthetic_op",
+            request_id="request-1",
+            trace_id="trace-1",
+        )
+        logger.info(
+            "completed",
+            raw_payload="must-not-survive",
+            access_token="synthetic-secret",
+        )
+
+        self.assertNotIn("raw_payload", messages[0])
+        self.assertNotIn("must-not-survive", messages[0])
+        self.assertNotIn("access_token", messages[0])
+        self.assertNotIn("synthetic-secret", messages[0])
+
+    @unittest.skipIf(op is None, "dagster is not installed")
+    def test_safe_context_works_with_real_dagster_op(self) -> None:
+        @op
+        def synthetic_security_logging_op(context) -> None:
+            safe_context = safe_log_context(context)
+            self.assertEqual(
+                safe_context.log._component,
+                "synthetic_security_logging_op",
+            )
+            safe_context.log.info("synthetic dagster message")
+
+        @job
+        def synthetic_security_logging_job() -> None:
+            synthetic_security_logging_op()
+
+        result = synthetic_security_logging_job.execute_in_process()
+        self.assertTrue(result.success)
+
     def test_pseudonym_is_hmac_and_versioned(self) -> None:
         raw_identifier = "synthetic-employee-42"
         with patch.dict(

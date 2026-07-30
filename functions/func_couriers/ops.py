@@ -4,6 +4,7 @@ import asyncio
 from dagster import Field, OpExecutionContext, op
 
 from functions.shared.daily_job_config import DAILY_REPORT_CONFIG_SCHEMA
+from security_logging import safe_log_context
 
 from .utils.op_certificates import run_certificates
 from .utils.op_couriers import run_couriers
@@ -34,7 +35,7 @@ MANUAL_WAITING_REPORT_CONFIG = {
 )
 def couriers_op(context: OpExecutionContext):
     """Собирает отчет по курьерам и отправляет в RabbitMQ."""
-    asyncio.run(run_couriers(context))
+    asyncio.run(run_couriers(safe_log_context(context)))
 
 
 @op(
@@ -43,7 +44,7 @@ def couriers_op(context: OpExecutionContext):
 )
 def certificates_op(context: OpExecutionContext):
     """Собирает отчет по сертификатам и отправляет в RabbitMQ."""
-    asyncio.run(run_certificates(context))
+    asyncio.run(run_certificates(safe_log_context(context)))
 
 
 @op(
@@ -52,7 +53,7 @@ def certificates_op(context: OpExecutionContext):
 )
 def later_op(context: OpExecutionContext):
     """Собирает отчет по опозданиям и прогулам и отправляет в RabbitMQ."""
-    asyncio.run(run_later(context))
+    asyncio.run(run_later(safe_log_context(context)))
 
 
 @op(
@@ -61,7 +62,7 @@ def later_op(context: OpExecutionContext):
 )
 def waiting_op(context: OpExecutionContext):
     """Собирает отчет по ожиданиям курьеров для RabbitMQ или WebApp."""
-    asyncio.run(run_waiting(context))
+    asyncio.run(run_waiting(safe_log_context(context)))
 
 
 @op(
@@ -70,7 +71,7 @@ def waiting_op(context: OpExecutionContext):
 )
 def sectors_op(context: OpExecutionContext):
     """Собирает отчет по секторам доставки и отправляет в RabbitMQ."""
-    asyncio.run(run_sectors(context))
+    asyncio.run(run_sectors(safe_log_context(context)))
 
 
 @op(
@@ -79,4 +80,4 @@ def sectors_op(context: OpExecutionContext):
 )
 def longers_op(context: OpExecutionContext):
     """Собирает подробный отчет по долгим доставкам и отправляет в RabbitMQ."""
-    asyncio.run(run_longers(context))
+    asyncio.run(run_longers(safe_log_context(context)))

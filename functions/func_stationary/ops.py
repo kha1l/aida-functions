@@ -4,6 +4,7 @@ import asyncio
 from dagster import Field, OpExecutionContext, op
 
 from functions.shared.daily_job_config import DAILY_REPORT_CONFIG_SCHEMA
+from security_logging import safe_log_context
 
 from .utils.op_drink_rest import run_drink_rest
 from .utils.op_assembly_rest import run_assembly_rest
@@ -32,7 +33,7 @@ MANUAL_STATIONARY_DRINK_REPORT_CONFIG = {
 )
 def stationary_op(context: OpExecutionContext):
     """Собирает отчет по ресторану и отправляет его в RabbitMQ."""
-    asyncio.run(run_stationary(context))
+    asyncio.run(run_stationary(safe_log_context(context)))
 
 
 @op(
@@ -41,7 +42,7 @@ def stationary_op(context: OpExecutionContext):
 )
 def later_rest_op(context: OpExecutionContext):
     """Собирает подробный отчет по долгим заказам ресторана и отправляет его в RabbitMQ."""
-    asyncio.run(run_later_rest(context))
+    asyncio.run(run_later_rest(safe_log_context(context)))
 
 
 @op(
@@ -50,7 +51,7 @@ def later_rest_op(context: OpExecutionContext):
 )
 def assembly_rest_op(context: OpExecutionContext):
     """Собирает подробный отчет по долгой сборке заказов и отправляет его в RabbitMQ."""
-    asyncio.run(run_assembly_rest(context))
+    asyncio.run(run_assembly_rest(safe_log_context(context)))
 
 
 @op(
@@ -59,4 +60,4 @@ def assembly_rest_op(context: OpExecutionContext):
 )
 def drink_rest_op(context: OpExecutionContext):
     """Собирает подробный отчет по долгим напиткам и отправляет его в RabbitMQ."""
-    asyncio.run(run_drink_rest(context))
+    asyncio.run(run_drink_rest(safe_log_context(context)))

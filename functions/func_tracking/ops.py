@@ -3,6 +3,7 @@
 import asyncio
 
 from dagster import Field, OpExecutionContext, op
+from security_logging import safe_log_context
 
 from .utils.op_tracking import run_tracking
 
@@ -20,4 +21,4 @@ TRACKING_OP_CONFIG = {
 )
 def tracking_op(context: OpExecutionContext) -> None:
     """Запускает manual-отчет по трекингу для выбранных заведений."""
-    asyncio.run(run_tracking(context))
+    asyncio.run(run_tracking(safe_log_context(context)))

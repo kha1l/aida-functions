@@ -3,6 +3,7 @@ import asyncio
 from dagster import OpExecutionContext, op
 
 from functions.shared.daily_job_config import DAILY_REPORT_CONFIG_SCHEMA
+from security_logging import safe_log_context
 
 from .utils.op_birthday import run_birthday
 
@@ -13,4 +14,4 @@ from .utils.op_birthday import run_birthday
 )
 def birthday_op(context: OpExecutionContext):
     """Запускает ежедневную отправку отчетов по дням рождения."""
-    asyncio.run(run_birthday(context))
+    asyncio.run(run_birthday(safe_log_context(context)))
