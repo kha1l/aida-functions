@@ -37,6 +37,8 @@ MAX_CONCURRENT_UNITS = 15
 PAGE_SIZE = 500
 COMPARE_PERIOD_DAYS = 7
 LONG_DINE_IN_THRESHOLD_SECONDS = 15 * 60
+TODAY_RATINGS_UNAVAILABLE_MARKER = "Unable to get statistics for today"
+TODAY_RATINGS_UNAVAILABLE_TEXT = "недоступен за текущий день"
 
 
 def _floor_to_hour(value: datetime) -> datetime:
@@ -87,8 +89,8 @@ class MetricsHandoverStats:
 class MetricsCustomerRatings:
     """Средние оценки и количество оцененных заказов по каналам."""
 
-    avg_dine_in_order_rate: float
-    avg_delivery_order_rate: float
+    avg_dine_in_order_rate: Optional[float]
+    avg_delivery_order_rate: Optional[float]
     dine_in_rate_count: int
     delivery_rate_count: int
 
@@ -587,6 +589,17 @@ async def _fetch_customer_ratings(
             "to": report_day.isoformat(),
         },
     )
+    if (
+        not result.ok
+        and result.status == 400
+        and TODAY_RATINGS_UNAVAILABLE_MARKER in (result.error_html or "")
+    ):
+        return MetricsCustomerRatings(
+            avg_dine_in_order_rate=None,
+            avg_delivery_order_rate=None,
+            dine_in_rate_count=0,
+            delivery_rate_count=0,
+        ), None, 200
     if not result.ok:
         return None, result.error_html, result.status
 
@@ -824,8 +837,10 @@ def _format_percent(value: float) -> str:
     return text.replace(".", ",")
 
 
-def _format_rating(value: float, count: int) -> str:
+def _format_rating(value: Optional[float], count: int) -> str:
     """Форматирует среднюю оценку в виде `4,7 ⭐️ (141)`."""
+    if value is None:
+        return TODAY_RATINGS_UNAVAILABLE_TEXT
     rating = f"{value:.1f}".replace(".", ",")
     return f"{rating} ⭐️ ({count})"
 

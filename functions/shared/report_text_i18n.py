@@ -67,6 +67,7 @@ _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("#отчетПоРесторану", "#restaurantReport"),
     ),
     "metrics": (
+        ("недоступен за текущий день", "unavailable for the current day"),
         ("📊 <b>Ключевые метрики в заведении ", "📊 <b>Key metrics for "),
         ("Производительность: ", "Productivity: "),
         ("Продуктов на чел/час: ", "Products per labor hour: "),
