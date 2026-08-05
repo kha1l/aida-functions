@@ -18,6 +18,10 @@ from functions.shared.daily_job_config import (
     is_configured_run,
     select_configured_unit_uuids,
 )
+from functions.shared.customer_ratings import (
+    fetch_customer_ratings,
+    format_customer_rating,
+)
 from functions.shared.unit_time import build_report_local_day_window, resolve_unit_now
 
 from config import couriers_settings, WeatherSettings, schedule_local_hours, weather_settings
@@ -249,6 +253,15 @@ async def _build_couriers_report(
     if not handover.ok:
         return None, handover.error_html, handover.status
 
+    ratings, ratings_error, ratings_status = await fetch_customer_ratings(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        report_day=dt_start.date(),
+    )
+    if ratings is None:
+        return None, ratings_error, ratings_status
+
     prod_couriers = _extract_productivity(productivity.data if isinstance(productivity.data, dict) else {})
     revenue_del, orders_del = _extract_delivery_overview(
         statistics.data if isinstance(statistics.data, dict) else {}
@@ -271,7 +284,8 @@ async def _build_couriers_report(
         f"Выручка доставки: {revenue_del}\n"
         f"Заказы на доставку: {orders_del}\n\n"
         f"Заказов на курьера в час: {prod_couriers}\n"
-        f"{delivery_text}\n"
+        f"{delivery_text}"
+        f"Рейтинг клиента на доставку: {format_customer_rating(ratings.avg_delivery_order_rate, ratings.delivery_rate_count)}\n\n"
         f"{weather_text}"
     )
     return message, None, 200

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -37,8 +37,6 @@ MAX_CONCURRENT_UNITS = 15
 PAGE_SIZE = 500
 COMPARE_PERIOD_DAYS = 7
 LONG_DINE_IN_THRESHOLD_SECONDS = 15 * 60
-TODAY_RATINGS_UNAVAILABLE_MARKER = "Unable to get statistics for today"
-TODAY_RATINGS_UNAVAILABLE_TEXT = "недоступен за текущий день"
 
 
 def _floor_to_hour(value: datetime) -> datetime:
@@ -83,16 +81,6 @@ class MetricsHandoverStats:
     dine_in_long_orders_count: int
     delivery_orders_count: int
     delivery_total_cooking_seconds: int
-
-
-@dataclass(frozen=True, slots=True)
-class MetricsCustomerRatings:
-    """Средние оценки и количество оцененных заказов по каналам."""
-
-    avg_dine_in_order_rate: Optional[float]
-    avg_delivery_order_rate: Optional[float]
-    dine_in_rate_count: int
-    delivery_rate_count: int
 
 
 async def run_metrics(context: OpExecutionContext) -> None:
@@ -350,12 +338,6 @@ async def _build_metrics_report(
         "production/orders-handover-time",
         params=params_current,
     )
-    ratings_task = _fetch_customer_ratings(
-        dodo_api=dodo_api,
-        account_id=account_id,
-        unit_uuid=unit_uuid,
-        report_day=current_start.date(),
-    )
     couriers_on_shift_task = _count_staff_on_shift(
         dodo_api=dodo_api,
         account_id=account_id,
@@ -380,7 +362,6 @@ async def _build_metrics_report(
         productivity_result,
         courier_orders_result,
         handover_result,
-        ratings_result,
         couriers_on_shift_result,
         kitchen_on_shift_result,
     ) = await asyncio.gather(
@@ -390,7 +371,6 @@ async def _build_metrics_report(
         productivity_task,
         courier_orders_task,
         handover_task,
-        ratings_task,
         couriers_on_shift_task,
         kitchen_on_shift_task,
     )
@@ -407,8 +387,6 @@ async def _build_metrics_report(
         return None, courier_orders_result[1], courier_orders_result[2]
     if not handover_result.ok:
         return None, handover_result.error_html, handover_result.status
-    if ratings_result[0] is None:
-        return None, ratings_result[1], ratings_result[2]
     if couriers_on_shift_result[0] is None:
         return None, couriers_on_shift_result[1], couriers_on_shift_result[2]
     if kitchen_on_shift_result[0] is None:
@@ -428,8 +406,6 @@ async def _build_metrics_report(
     handover_stats = _extract_handover_stats(
         handover_result.data if isinstance(handover_result.data, dict) else {}
     )
-    customer_ratings = ratings_result[0]
-    assert customer_ratings is not None
     long_delivery_percent = _calculate_long_deliveries_percent(
         statistics=delivery_result.data if isinstance(delivery_result.data, dict) else {},
         delivery_times_by_order_id=delivery_times_by_order_id,
@@ -445,7 +421,6 @@ async def _build_metrics_report(
             productivity_stats=productivity_stats,
             delivery_stats=delivery_stats,
             handover_stats=handover_stats,
-            customer_ratings=customer_ratings,
             kitchen_on_shift=kitchen_on_shift_result[0] or 0,
             couriers_on_shift=couriers_on_shift_result[0] or 0,
             long_delivery_percent=long_delivery_percent,
@@ -572,58 +547,6 @@ async def _fetch_productivity_stats(
     ), None, 200
 
 
-async def _fetch_customer_ratings(
-    *,
-    dodo_api,
-    account_id: int,
-    unit_uuid: str,
-    report_day: date,
-) -> tuple[Optional[MetricsCustomerRatings], Optional[str], Optional[int]]:
-    """Получает средние оценки заказов за локальную дату оперативного отчёта."""
-    result = await dodo_api.get(
-        account_id,
-        "https://api.dodois.io/customer-feedback/customer-ratings",
-        params={
-            "units": unit_uuid,
-            "from": report_day.isoformat(),
-            "to": report_day.isoformat(),
-        },
-    )
-    if (
-        not result.ok
-        and result.status == 400
-        and TODAY_RATINGS_UNAVAILABLE_MARKER in (result.error_html or "")
-    ):
-        return MetricsCustomerRatings(
-            avg_dine_in_order_rate=None,
-            avg_delivery_order_rate=None,
-            dine_in_rate_count=0,
-            delivery_rate_count=0,
-        ), None, 200
-    if not result.ok:
-        return None, result.error_html, result.status
-
-    data = result.data if isinstance(result.data, dict) else {}
-    rows = data.get("customerRatings", []) or []
-    normalized_unit_uuid = unit_uuid.casefold()
-    row = next(
-        (
-            item
-            for item in rows
-            if isinstance(item, dict)
-            and str(item.get("unitId") or "").casefold() == normalized_unit_uuid
-        ),
-        {},
-    )
-
-    return MetricsCustomerRatings(
-        avg_dine_in_order_rate=_to_float(row.get("avgDineInOrderRate")),
-        avg_delivery_order_rate=_to_float(row.get("avgDeliveryOrderRate")),
-        dine_in_rate_count=to_int(row.get("dineInRateCount")) or 0,
-        delivery_rate_count=to_int(row.get("deliveryRateCount")) or 0,
-    ), None, 200
-
-
 async def _count_staff_on_shift(
     *,
     dodo_api,
@@ -746,7 +669,6 @@ def _format_metrics_message(
     productivity_stats: MetricsProductivityStats,
     delivery_stats: MetricsDeliveryStats,
     handover_stats: MetricsHandoverStats,
-    customer_ratings: MetricsCustomerRatings,
     kitchen_on_shift: int,
     couriers_on_shift: int,
     long_delivery_percent: float,
@@ -783,8 +705,6 @@ def _format_metrics_message(
         f"Время приготовления в ресторан: {avg_rest_prep}",
         f"Время приготовления на доставку: {avg_delivery_cooking}",
         f"Процент долгих приготовлений: {_format_percent(long_dine_in_percent)}%",
-        f"Рейтинг клиента в ресторане: {_format_rating(customer_ratings.avg_dine_in_order_rate, customer_ratings.dine_in_rate_count)}",
-        f"Рейтинг клиента на доставку: {_format_rating(customer_ratings.avg_delivery_order_rate, customer_ratings.delivery_rate_count)}",
         "",
         "#метрики",
     ]
@@ -835,14 +755,6 @@ def _share_percent(part: int, whole: int) -> float:
 def _format_percent(value: float) -> str:
     text = f"{value:.2f}".rstrip("0").rstrip(".")
     return text.replace(".", ",")
-
-
-def _format_rating(value: Optional[float], count: int) -> str:
-    """Форматирует среднюю оценку в виде `4,7 ⭐️ (141)`."""
-    if value is None:
-        return TODAY_RATINGS_UNAVAILABLE_TEXT
-    rating = f"{value:.1f}".replace(".", ",")
-    return f"{rating} ⭐️ ({count})"
 
 
 def _build_order_key(order_id: object, order_number: object) -> str:

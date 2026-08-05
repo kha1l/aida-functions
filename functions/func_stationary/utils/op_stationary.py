@@ -16,6 +16,11 @@ from functions.shared.daily_job_config import (
     is_configured_run,
     select_configured_unit_uuids,
 )
+from functions.shared.customer_ratings import (
+    CustomerRatings,
+    fetch_customer_ratings,
+    format_customer_rating,
+)
 from functions.shared.report_job_runtime import (
     load_report_job_snapshot,
     log_auth_error,
@@ -192,25 +197,37 @@ async def _build_stationary_report(
         account_id=account_id,
         params_base=params_base,
     )
-    handover, sales_stats_result = await asyncio.gather(
+    ratings_task = fetch_customer_ratings(
+        dodo_api=dodo_api,
+        account_id=account_id,
+        unit_uuid=unit_uuid,
+        report_day=dt_start.date(),
+    )
+    handover, sales_stats_result, ratings_result = await asyncio.gather(
         handover_task,
         sales_stats_task,
+        ratings_task,
     )
 
     if not handover.ok:
         return None, handover.error_html, handover.status
     if sales_stats_result[0] is None:
         return None, sales_stats_result[1], sales_stats_result[2]
+    if ratings_result[0] is None:
+        return None, ratings_result[1], ratings_result[2]
 
     handover_stats = _extract_handover_stats(
         handover.data if isinstance(handover.data, dict) else {}
     )
     sales_stats = sales_stats_result[0]
+    ratings = ratings_result[0]
+    assert ratings is not None
     return _format_stationary_message(
         unit_name=unit_name,
         date_label=date_label,
         handover_stats=handover_stats,
         sales_stats=sales_stats,
+        ratings=ratings,
     ), None, 200
 
 
@@ -341,6 +358,7 @@ def _format_stationary_message(
     date_label: str,
     handover_stats: StationaryHandoverStats,
     sales_stats: StationarySalesStats,
+    ratings: CustomerRatings,
 ) -> str:
     avg_prep = timedelta(
         seconds=round(handover_stats.total_prep_seconds / handover_stats.dine_in_orders_count)
@@ -389,6 +407,7 @@ def _format_stationary_message(
         f"Заказы: {sales_stats.orders_total}",
         f"Среднее время приготовления: {avg_prep}",
         f"Долгие заказы: {long_orders_percent}%",
+        f"Рейтинг клиента в ресторане: {format_customer_rating(ratings.avg_dine_in_order_rate, ratings.dine_in_rate_count)}",
         f"Заказов через приложение: {sales_stats.mobile_orders_total} ({mobile_percent})",
         f"Заказов через киоск: {sales_stats.kiosk_orders_total} ({kiosk_percent})",
         "Продажи через ресторан:",

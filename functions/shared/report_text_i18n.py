@@ -36,6 +36,7 @@ _COMMON_REPLACEMENTS: tuple[tuple[str, str], ...] = (
 
 _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
     "couriers": (
+        ("Рейтинг клиента на доставку: ", "Delivery customer rating: "),
         ("🚚 Краткий отчет по доставке за ", "🚚 Delivery summary for "),
         ("Выручка доставки: ", "Delivery revenue: "),
         ("Заказы на доставку: ", "Delivery orders: "),
@@ -55,6 +56,7 @@ _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("#отчетПоКурьерам", "#couriersReport"),
     ),
     "stationary": (
+        ("Рейтинг клиента в ресторане: ", "Dine-in customer rating: "),
         ("🌇 Краткий отчет по ресторану за ", "🌇 Restaurant summary for "),
         ("Среднее время приготовления: ", "Average prep time: "),
         ("Долгие заказы: ", "Long orders: "),
@@ -67,7 +69,6 @@ _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("#отчетПоРесторану", "#restaurantReport"),
     ),
     "metrics": (
-        ("недоступен за текущий день", "unavailable for the current day"),
         ("📊 <b>Ключевые метрики в заведении ", "📊 <b>Key metrics for "),
         ("Производительность: ", "Productivity: "),
         ("Продуктов на чел/час: ", "Products per labor hour: "),
@@ -83,8 +84,6 @@ _POST_REPLACEMENTS: dict[str, tuple[tuple[str, str], ...]] = {
         ("Время приготовления в ресторан: ", "Prep time for dine-in: "),
         ("Время приготовления на доставку: ", "Prep time for delivery: "),
         ("Процент долгих приготовлений: ", "Long prep share: "),
-        ("Средняя оценка заказов, сделанных в ресторане: ", "Average rating for dine-in orders: "),
-        ("Средняя оценка заказов, сделанных на доставку: ", "Average rating for delivery orders: "),
         ("#метрики", "#metrics"),
     ),
     "revenue": (
