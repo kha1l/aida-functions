@@ -352,7 +352,7 @@ async def _build_metrics_report(
         dodo_api=dodo_api,
         account_id=account_id,
         unit_uuid=unit_uuid,
-        report_day=current_start.date() - timedelta(days=1),
+        report_day=current_start.date(),
     )
     couriers_on_shift_task = _count_staff_on_shift(
         dodo_api=dodo_api,
@@ -577,7 +577,7 @@ async def _fetch_customer_ratings(
     unit_uuid: str,
     report_day: date,
 ) -> tuple[Optional[MetricsCustomerRatings], Optional[str], Optional[int]]:
-    """Получает средние оценки заказов по ресторану и доставке за последний доступный день."""
+    """Получает средние оценки заказов за локальную дату оперативного отчёта."""
     result = await dodo_api.get(
         account_id,
         "https://api.dodois.io/customer-feedback/customer-ratings",
@@ -592,9 +592,16 @@ async def _fetch_customer_ratings(
 
     data = result.data if isinstance(result.data, dict) else {}
     rows = data.get("customerRatings", []) or []
-    row = rows[0] if rows else {}
-    if not isinstance(row, dict):
-        row = {}
+    normalized_unit_uuid = unit_uuid.casefold()
+    row = next(
+        (
+            item
+            for item in rows
+            if isinstance(item, dict)
+            and str(item.get("unitId") or "").casefold() == normalized_unit_uuid
+        ),
+        {},
+    )
 
     return MetricsCustomerRatings(
         avg_dine_in_order_rate=_to_float(row.get("avgDineInOrderRate")),

@@ -56,6 +56,8 @@ class ReportJobSnapshot:
 
     def candidate_accounts_for(self, unit_uuid: str) -> List[int]:
         """Возвращает список токенов-кандидатов с fallback на account_id подписок."""
+        if unit_uuid not in self.units:
+            return []
         order_account_ids = list({acc for acc in self.accounts_by_unit.get(unit_uuid, [])})
         return self.candidate_accounts_by_unit.get(unit_uuid, []) or order_account_ids
 
